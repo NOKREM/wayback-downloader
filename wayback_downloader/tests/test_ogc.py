@@ -9,8 +9,10 @@ import pytest
 from wayback_downloader.api.ogc import (
     MAX_WMS_PIXELS,
     TileMatrixSetDef,
+    WmsLayer,
     WmtsCapabilities,
     WmtsLayer,
+    parse_wms_capabilities,
     parse_wmts_capabilities,
     wms_getmap_url,
     wmts_tile_url,
@@ -289,6 +291,122 @@ def test_default_format_prefers_jpeg() -> None:
     """JPEG is chosen over PNG for photographic imagery."""
     assert caps().layers["aerial_2024"].default_format == "image/jpeg"
     assert caps().layers["national_grid"].default_format == "image/png"
+
+
+# WMS nests layers: the outer one is a grouping node with no Name, and the
+# children inherit its CRS list. Shaped after a real GeoServer response.
+WMS_130 = """<?xml version="1.0"?>
+<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms">
+  <Service><Name>WMS</Name><Title>GeoServer Web Map Service</Title></Service>
+  <Capability>
+    <Layer>
+      <Title>Grouping node</Title>
+      <CRS>EPSG:4326</CRS>
+      <CRS>EPSG:3857</CRS>
+      <Layer queryable="1">
+        <Name>DRYGEO2</Name>
+        <Title>Active faults</Title>
+        <EX_GeographicBoundingBox>
+          <westBoundLongitude>25.829</westBoundLongitude>
+          <eastBoundLongitude>44.809</eastBoundLongitude>
+          <southBoundLatitude>35.875</southBoundLatitude>
+          <northBoundLatitude>41.867</northBoundLatitude>
+        </EX_GeographicBoundingBox>
+      </Layer>
+      <Layer>
+        <Name>KFAY</Name>
+        <Title>Other</Title>
+        <CRS>EPSG:27700</CRS>
+      </Layer>
+    </Layer>
+  </Capability>
+</WMS_Capabilities>
+"""
+
+WMS_111 = """<?xml version="1.0"?>
+<WMT_MS_Capabilities version="1.1.1">
+  <Service><Name>OGC:WMS</Name><Title>Legacy service</Title></Service>
+  <Capability>
+    <Layer>
+      <Title>Root</Title>
+      <SRS>EPSG:4326</SRS>
+      <Layer>
+        <Name>ortho</Name>
+        <Title>Orthophoto</Title>
+        <LatLonBoundingBox minx="26.0" miny="38.0" maxx="27.0" maxy="39.0"/>
+      </Layer>
+    </Layer>
+  </Capability>
+</WMT_MS_Capabilities>
+"""
+
+
+def test_wms_parses_named_layers_only() -> None:
+    """Grouping nodes without a Name are not requestable and are skipped."""
+    parsed = parse_wms_capabilities(WMS_130, SERVICE)
+    assert parsed.title == "GeoServer Web Map Service"
+    assert parsed.version == "1.3.0"
+    assert [layer.name for layer in parsed.layers] == ["DRYGEO2", "KFAY"]
+
+
+def test_wms_children_inherit_parent_crs() -> None:
+    """A nested layer is requestable in its ancestors' CRSs too."""
+    parsed = parse_wms_capabilities(WMS_130, SERVICE)
+    assert set(parsed.layer("DRYGEO2").crs) == {"EPSG:4326", "EPSG:3857"}
+    # KFAY adds its own on top of the inherited pair.
+    assert set(parsed.layer("KFAY").crs) == {"EPSG:4326", "EPSG:3857", "EPSG:27700"}
+
+
+def test_wms_reads_geographic_bounds() -> None:
+    """The 1.3.0 EX_GeographicBoundingBox is parsed into an extent."""
+    bounds = parse_wms_capabilities(WMS_130, SERVICE).layer("DRYGEO2").bounds
+    assert bounds is not None
+    assert bounds.west == pytest.approx(25.829)
+    assert bounds.north == pytest.approx(41.867)
+
+
+def test_wms_111_uses_srs_and_latlonbbox() -> None:
+    """The 1.1.1 spellings of CRS and bounds are handled too."""
+    parsed = parse_wms_capabilities(WMS_111, SERVICE)
+    assert parsed.version == "1.1.1"
+
+    layer = parsed.layer("ortho")
+    assert layer.crs == ("EPSG:4326",)
+    assert layer.bounds is not None
+    assert layer.bounds.east == pytest.approx(27.0)
+
+
+def test_wms_layer_lookup_is_case_insensitive_and_explains_misses() -> None:
+    """A wrong name reports what the service does publish."""
+    parsed = parse_wms_capabilities(WMS_130, SERVICE)
+    assert parsed.layer("drygeo2").name == "DRYGEO2"
+    with pytest.raises(ValidationError, match="DRYGEO2"):
+        parsed.layer("missing")
+
+
+def test_wms_queryable_flag_is_read() -> None:
+    """The queryable attribute survives parsing."""
+    parsed = parse_wms_capabilities(WMS_130, SERVICE)
+    assert parsed.layer("DRYGEO2").queryable is True
+    assert parsed.layer("KFAY").queryable is False
+
+
+def test_wms_capabilities_without_named_layers_are_rejected() -> None:
+    """A document with only grouping nodes is an error."""
+    document = """<?xml version="1.0"?>
+    <WMS_Capabilities version="1.3.0"><Service><Title>x</Title></Service>
+    <Capability><Layer><Title>only a group</Title></Layer></Capability></WMS_Capabilities>"""
+    with pytest.raises(EndpointDiscoveryError, match="no named layers"):
+        parse_wms_capabilities(document, SERVICE)
+
+
+def test_wms_supports_wgs84_flags_usable_layers() -> None:
+    """Layers are marked by whether this tool can request their CRS."""
+    parsed = parse_wms_capabilities(WMS_130, SERVICE)
+    assert parsed.layer("DRYGEO2").supports_wgs84() is True
+
+    unusable = WmsLayer("x", "x", ("EPSG:27700",), None)
+    assert unusable.supports_wgs84() is False
 
 
 BOX = BoundingBox(west=26.965, south=38.795, east=26.980, north=38.805)

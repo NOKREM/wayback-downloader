@@ -272,6 +272,138 @@ def parse_wmts_capabilities(xml: str, service_url: str) -> WmtsCapabilities:
     return capabilities
 
 
+@dataclass(frozen=True)
+class WmsLayer:
+    """One requestable layer advertised by a WMS service."""
+
+    name: str
+    title: str
+    crs: tuple[str, ...]
+    bounds: BoundingBox | None
+    queryable: bool = False
+
+    def supports_wgs84(self) -> bool:
+        """Whether the layer advertises a CRS this downloader can request."""
+        wanted = {"epsg:4326", "crs:84", "epsg:3857", "epsg:900913"}
+        return any(code.strip().lower() in wanted for code in self.crs)
+
+
+@dataclass
+class WmsCapabilities:
+    """The parts of a WMS capabilities document this downloader needs."""
+
+    service_url: str
+    title: str
+    version: str
+    layers: list[WmsLayer] = field(default_factory=list)
+
+    def layer(self, name: str) -> WmsLayer:
+        """Return a layer by name, case-insensitively."""
+        for item in self.layers:
+            if item.name == name:
+                return item
+        lowered = name.lower()
+        for item in self.layers:
+            if item.name.lower() == lowered:
+                return item
+        available = ", ".join(item.name for item in self.layers[:12])
+        raise ValidationError(
+            f"Layer {name!r} is not published by this service. Available: {available}"
+            + (" ..." if len(self.layers) > 12 else "")
+        )
+
+
+def _geographic_bounds(node: ET.Element) -> BoundingBox | None:
+    """Extract a layer's geographic extent from either WMS spelling.
+
+    1.3.0 uses ``EX_GeographicBoundingBox`` with child elements; 1.1.1 uses
+    ``LatLonBoundingBox`` with attributes.
+    """
+    exgeo = _child(node, "EX_GeographicBoundingBox")
+    if exgeo is not None:
+        try:
+            return BoundingBox(
+                west=float(_text(_child(exgeo, "westBoundLongitude"))),
+                east=float(_text(_child(exgeo, "eastBoundLongitude"))),
+                south=float(_text(_child(exgeo, "southBoundLatitude"))),
+                north=float(_text(_child(exgeo, "northBoundLatitude"))),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    latlon = _child(node, "LatLonBoundingBox")
+    if latlon is not None:
+        try:
+            return BoundingBox(
+                west=float(latlon.get("minx", "")),
+                south=float(latlon.get("miny", "")),
+                east=float(latlon.get("maxx", "")),
+                north=float(latlon.get("maxy", "")),
+            )
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def parse_wms_capabilities(xml: str, service_url: str) -> WmsCapabilities:
+    """Parse a WMS ``GetCapabilities`` document.
+
+    WMS nests layers, and only those carrying a ``<Name>`` can be requested --
+    the rest are grouping nodes. Children inherit their parents' CRS list and
+    fall back to a parent's extent, so the tree is walked rather than flattened.
+    """
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError as exc:
+        raise EndpointDiscoveryError(
+            f"Could not parse WMS capabilities from {service_url}: {exc}"
+        ) from exc
+
+    service = _descendant(root, "Service")
+    title = _text(_child(service, "Title")) or "WMS service"
+    version = root.get("version") or "1.3.0"
+
+    capabilities = WmsCapabilities(service_url=service_url, title=title, version=version)
+
+    def walk(
+        node: ET.Element, inherited_crs: tuple[str, ...], inherited_bounds: BoundingBox | None
+    ) -> None:
+        """Collect named layers, propagating inherited CRS and extent."""
+        # 1.3.0 spells it CRS, 1.1.1 spells it SRS.
+        own = tuple(
+            _text(element)
+            for element in node
+            if _local(element.tag) in {"CRS", "SRS"} and _text(element)
+        )
+        crs = tuple(dict.fromkeys(inherited_crs + own))
+        bounds = _geographic_bounds(node) or inherited_bounds
+
+        name = _text(_child(node, "Name"))
+        if name:
+            capabilities.layers.append(
+                WmsLayer(
+                    name=name,
+                    title=_text(_child(node, "Title")) or name,
+                    crs=crs,
+                    bounds=bounds,
+                    queryable=node.get("queryable") in {"1", "true"},
+                )
+            )
+
+        for child in _children(node, "Layer"):
+            walk(child, crs, bounds)
+
+    capability = _descendant(root, "Capability")
+    for layer_node in _children(capability, "Layer"):
+        walk(layer_node, (), None)
+
+    if not capabilities.layers:
+        raise EndpointDiscoveryError(
+            f"The WMS capabilities at {service_url} advertise no named layers."
+        )
+    return capabilities
+
+
 def _with_query(url: str, params: dict[str, Any]) -> str:
     """Merge query parameters into a URL, preserving any already present."""
     parts = urlparse(url)
@@ -408,6 +540,19 @@ class OgcClient:
             url, accept="text/xml,application/xml,*/*", description="WMTS capabilities"
         )
         return parse_wmts_capabilities(response.text, service_url)
+
+    async def wms_capabilities(self, service_url: str, version: str = "1.3.0") -> WmsCapabilities:
+        """Fetch and parse a WMS capabilities document."""
+        url = service_url
+        if "request=" not in url.lower():
+            url = _with_query(
+                url, {"SERVICE": "WMS", "REQUEST": "GetCapabilities", "VERSION": version}
+            )
+
+        response = await self._http.get(
+            url, accept="text/xml,application/xml,*/*", description="WMS capabilities"
+        )
+        return parse_wms_capabilities(response.text, service_url)
 
     async def fetch_image(self, url: str, description: str) -> bytes:
         """Fetch an image, rejecting an XML service exception dressed as a tile.

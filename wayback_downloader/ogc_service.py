@@ -22,6 +22,7 @@ from wayback_downloader import __version__
 from wayback_downloader.api.ogc import (
     MAX_WMS_PIXELS,
     OgcClient,
+    WmsCapabilities,
     WmtsCapabilities,
     wms_getmap_url,
     wmts_tile_url,
@@ -100,6 +101,10 @@ class OgcService:
     async def capabilities(self, service_url: str) -> WmtsCapabilities:
         """Fetch and parse a WMTS service's capabilities."""
         return await self.client.wmts_capabilities(service_url)
+
+    async def wms_capabilities(self, service_url: str, version: str = "1.3.0") -> WmsCapabilities:
+        """Fetch and parse a WMS service's capabilities."""
+        return await self.client.wms_capabilities(service_url, version)
 
     async def download_wmts(
         self,

@@ -755,11 +755,16 @@ def wmts(
 @handle_errors
 def wms(
     service_url: Annotated[str, typer.Argument(help="WMS service endpoint URL.")],
-    layers: Annotated[str, typer.Option("--layers", help="Comma-separated layer names.")],
-    west: Annotated[float, typer.Option("--west", help="Western longitude.")],
-    south: Annotated[float, typer.Option("--south", help="Southern latitude.")],
-    east: Annotated[float, typer.Option("--east", help="Eastern longitude.")],
-    north: Annotated[float, typer.Option("--north", help="Northern latitude.")],
+    layers: Annotated[
+        Optional[str], typer.Option("--layers", help="Comma-separated layer names.")
+    ] = None,
+    west: Annotated[Optional[float], typer.Option("--west", help="Western longitude.")] = None,
+    south: Annotated[Optional[float], typer.Option("--south", help="Southern latitude.")] = None,
+    east: Annotated[Optional[float], typer.Option("--east", help="Eastern longitude.")] = None,
+    north: Annotated[Optional[float], typer.Option("--north", help="Northern latitude.")] = None,
+    list_layers: Annotated[
+        bool, typer.Option("--list-layers", help="List the service's layers and exit.")
+    ] = False,
     size: SizeOption = "1024",
     version: Annotated[
         str, typer.Option("--wms-version", help="WMS version: 1.3.0 or 1.1.1.")
@@ -773,20 +778,66 @@ def wms(
     ] = False,
     output: OutputOption = None,
 ) -> None:
-    """Download a bounding box from any WMS service.
+    """Download a bounding box from any WMS service, or list what it publishes.
 
     Requests larger than a single GetMap allows are split and reassembled.
     """
-    box = validate_bbox(west, south, east, north)
-    width, height = parse_size(size)
     if version not in {"1.3.0", "1.1.1"}:
         raise ValidationError(f"Unsupported WMS version {version!r}; use 1.3.0 or 1.1.1.")
 
     async def run() -> None:
         async with OgcService(use_cache=_STATE["cache"], progress=_progress()) as service:
+            if list_layers:
+                capabilities = await service.wms_capabilities(service_url, version)
+                table = Table(
+                    title=f"{capabilities.title} -- {len(capabilities.layers)} layer(s), "
+                    f"WMS {capabilities.version}"
+                )
+                table.add_column("Name", style="cyan")
+                table.add_column("Title")
+                table.add_column("Bounds (W S E N)", style="dim")
+                table.add_column("CRS", justify="center")
+                for item in capabilities.layers:
+                    extent = (
+                        f"{item.bounds.west:.3f} {item.bounds.south:.3f} "
+                        f"{item.bounds.east:.3f} {item.bounds.north:.3f}"
+                        if item.bounds
+                        else "-"
+                    )
+                    table.add_row(
+                        item.name,
+                        item.title[:38],
+                        extent,
+                        "[success]*[/success]" if item.supports_wgs84() else "[muted]-[/muted]",
+                    )
+                console.print(table)
+                console.print(
+                    "[muted]'*' marks layers advertising a CRS this tool can request. "
+                    "Bounds show the extent to pass to --west/--south/--east/--north.[/muted]"
+                )
+                return
+
+            missing = [
+                flag
+                for flag, value in (
+                    ("--layers", layers),
+                    ("--west", west),
+                    ("--south", south),
+                    ("--east", east),
+                    ("--north", north),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValidationError(
+                    f"{', '.join(missing)} required unless --list-layers is used."
+                )
+
+            box = validate_bbox(west, south, east, north)  # type: ignore[arg-type]
+            width, height = parse_size(size)
             result = await service.download_wms(
                 service_url,
-                layers,
+                layers,  # type: ignore[arg-type]
                 box,
                 width,
                 height,

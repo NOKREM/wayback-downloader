@@ -364,10 +364,11 @@ service. Everything below the protocol — the Web Mercator maths, the tile
 planner, the mosaicker, the encoder — is shared.
 
 ```bash
-# What does this service publish?
+# What does each service publish? --list-layers works on both.
 python main.py wmts https://example.org/wmts --list-layers
+python main.py wms  https://example.org/wms  --list-layers
 
-# Download from it, centred on a coordinate
+# WMTS, centred on a coordinate
 python main.py wmts https://example.org/wmts --layer aerial_2024 \
   --lat 38.7992 --lon 26.9723 --zoom 18 --size 1024
 
@@ -376,15 +377,35 @@ python main.py wms https://example.org/wms --layers ortho \
   --west 26.965 --south 38.795 --east 26.980 --north 38.805 --size 4096
 ```
 
-`--list-layers` marks which layers sit on a Web Mercator tile matrix set —
-those are the ones this tool can address directly. A layer in another
-projection is reported rather than silently mis-tiled.
+For WMTS, `--list-layers` marks the layers on a Web Mercator tile matrix set —
+those are the ones this tool can address directly; a layer in another
+projection is reported rather than silently mis-tiled. For WMS it also prints
+each layer's geographic extent, which is what you pass back as the bounding
+box:
+
+```
+┌────────────┬────────────┬─────────────────────────────┬─────┐
+│ Name       │ Title      │ Bounds (W S E N)            │ CRS │
+├────────────┼────────────┼─────────────────────────────┼─────┤
+│ DRYGEO2    │ DRYGEO2    │ 25.829 35.875 44.809 41.867 │  *  │
+└────────────┴────────────┴─────────────────────────────┴─────┘
+```
+
+WMS nests its layers: only nodes carrying a `<Name>` are requestable, and
+children inherit their parents' CRS list and extent, so the tree is walked
+rather than flattened.
 
 Two details that bite in practice, both pinned by tests:
 
 * **WMS 1.3.0 flipped the axis order.** EPSG:4326 became latitude-first, where
   1.1.1 was longitude-first. Getting it wrong returns imagery from somewhere
-  else entirely, with a perfectly healthy HTTP 200.
+  else entirely, with a perfectly healthy HTTP 200. Cross-checked against a
+  live server: the same bounding box requested as 1.3.0 and as 1.1.1 comes back
+  byte-identical.
+* **WMTS TileMatrix identifiers are not the zoom number.** Esri publishes `0`,
+  `1`, `2`; GeoServer publishes `EPSG:900913:0`, `EPSG:900913:1` and answers a
+  bare number with `InvalidParameterValue: Unknown TILEMATRIX`. The identifiers
+  are read from the capabilities rather than assumed.
 * **Namespace URIs vary.** The parser matches element local names rather than
   namespace URIs, because real services disagree with the standard — Esri's own
   Wayback WMTS declares `https://www.opengis.net/wmts/1.0` where OGC specifies
