@@ -8,6 +8,7 @@ import pytest
 
 from wayback_downloader.api.ogc import (
     MAX_WMS_PIXELS,
+    TileMatrixSetDef,
     WmtsCapabilities,
     WmtsLayer,
     parse_wmts_capabilities,
@@ -186,6 +187,102 @@ def test_kvp_fallback_when_no_template() -> None:
     assert query["TILEMATRIX"] == "5"
     assert query["TILECOL"] == "3"
     assert query["TILEROW"] == "7"
+
+
+# Shaped like GeoServer/GeoWebCache, which names its zoom levels after the
+# gridset and publishes one RESTful template per image format.
+GEOSERVER = """<?xml version="1.0"?>
+<Capabilities xmlns="http://www.opengis.net/wmts/1.0"
+              xmlns:ows="http://www.opengis.net/ows/1.1">
+  <ows:ServiceIdentification><ows:Title>GeoServer WMTS</ows:Title></ows:ServiceIdentification>
+  <Contents>
+    <Layer>
+      <ows:Identifier>mta:DRYGEO2</ows:Identifier>
+      <Style><ows:Identifier>DRFAY</ows:Identifier></Style>
+      <Format>image/png</Format>
+      <Format>image/jpeg</Format>
+      <TileMatrixSetLink><TileMatrixSet>EPSG:900913</TileMatrixSet></TileMatrixSetLink>
+      <ResourceURL format="image/png" resourceType="tile"
+        template="https://s/rest/mta:DRYGEO2/{style}/{TileMatrixSet}/{TileMatrix}/{TileRow}/{TileCol}?format=image/png"/>
+      <ResourceURL format="image/jpeg" resourceType="tile"
+        template="https://s/rest/mta:DRYGEO2/{style}/{TileMatrixSet}/{TileMatrix}/{TileRow}/{TileCol}?format=image/jpeg"/>
+    </Layer>
+    <TileMatrixSet>
+      <ows:Identifier>EPSG:900913</ows:Identifier>
+      <TileMatrix><ows:Identifier>EPSG:900913:0</ows:Identifier></TileMatrix>
+      <TileMatrix><ows:Identifier>EPSG:900913:1</ows:Identifier></TileMatrix>
+      <TileMatrix><ows:Identifier>EPSG:900913:2</ows:Identifier></TileMatrix>
+    </TileMatrixSet>
+  </Contents>
+</Capabilities>
+"""
+
+
+def geoserver() -> WmtsCapabilities:
+    """Parse the GeoServer-shaped capabilities document."""
+    return parse_wmts_capabilities(GEOSERVER, SERVICE)
+
+
+def test_tile_matrix_identifier_is_not_the_bare_zoom() -> None:
+    """GeoServer names levels after the gridset, and rejects a bare number.
+
+    Sending `16` where the service published `EPSG:900913:16` returns
+    HTTP 400 `InvalidParameterValue: Unknown TILEMATRIX 16` -- observed
+    against a live GeoServer deployment.
+    """
+    parsed = geoserver()
+    assert parsed.tile_matrix_id("EPSG:900913", 2) == "EPSG:900913:2"
+
+    url = wmts_tile_url(
+        parsed, parsed.layers["mta:DRYGEO2"], "EPSG:900913", TileIndex(z=2, x=3, y=1)
+    )
+    assert "/EPSG:900913/EPSG:900913:2/1/3" in url
+
+
+def test_tile_matrix_falls_back_to_the_zoom_number() -> None:
+    """An unadvertised matrix set still produces a usable request.
+
+    Esri's Wayback names its levels with the bare number, and a caller may
+    override the matrix set by hand.
+    """
+    assert caps().tile_matrix_id("GoogleMapsCompatible", 14) == "14"
+    assert geoserver().tile_matrix_id("EPSG:4326", 5) == "5"
+
+
+def test_tile_matrix_matches_by_trailing_level_not_position() -> None:
+    """Levels are matched on their trailing number, not their order."""
+    definition = TileMatrixSetDef("s", ("s:10", "s:11", "s:12"))
+    assert definition.matrix_for_zoom(11) == "s:11"
+    assert definition.matrix_for_zoom(12) == "s:12"
+    assert definition.matrix_for_zoom(99) is None
+
+
+def test_template_matches_the_requested_format() -> None:
+    """With one template per format, the requested format must win.
+
+    Taking the first published template would hand back PNG whenever the
+    caller asked for JPEG.
+    """
+    parsed = geoserver()
+    layer = parsed.layers["mta:DRYGEO2"]
+    tile = TileIndex(z=1, x=0, y=0)
+
+    assert "format=image/jpeg" in wmts_tile_url(
+        parsed, layer, "EPSG:900913", tile, image_format="image/jpeg"
+    )
+    assert "format=image/png" in wmts_tile_url(
+        parsed, layer, "EPSG:900913", tile, image_format="image/png"
+    )
+
+
+def test_lowercase_style_placeholder_is_substituted() -> None:
+    """GeoServer templates use `{style}`, not `{Style}`."""
+    parsed = geoserver()
+    url = wmts_tile_url(
+        parsed, parsed.layers["mta:DRYGEO2"], "EPSG:900913", TileIndex(z=1, x=0, y=0)
+    )
+    assert "{style}" not in url
+    assert "/DRFAY/" in url
 
 
 def test_default_format_prefers_jpeg() -> None:

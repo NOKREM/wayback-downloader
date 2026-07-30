@@ -56,6 +56,34 @@ MAX_WMS_PIXELS = 4096
 
 
 @dataclass(frozen=True)
+class TileMatrixSetDef:
+    """A tile matrix set and the identifiers of its zoom levels.
+
+    The identifiers cannot be assumed to be the zoom number. Esri publishes
+    ``0``, ``1``, ``2`` ...; GeoServer publishes ``EPSG:900913:0``,
+    ``EPSG:900913:1`` ... and rejects a bare number with
+    ``InvalidParameterValue: Unknown TILEMATRIX``.
+    """
+
+    identifier: str
+    matrix_ids: tuple[str, ...]
+
+    def matrix_for_zoom(self, zoom: int) -> str | None:
+        """Return the TileMatrix identifier for a zoom level.
+
+        Matches on a trailing level number first, since that is what every
+        convention encodes, and falls back to positional order.
+        """
+        for matrix_id in self.matrix_ids:
+            tail = matrix_id.rsplit(":", 1)[-1]
+            if tail.isdigit() and int(tail) == zoom:
+                return matrix_id
+        if 0 <= zoom < len(self.matrix_ids):
+            return self.matrix_ids[zoom]
+        return None
+
+
+@dataclass(frozen=True)
 class WmtsLayer:
     """One layer advertised by a WMTS service."""
 
@@ -65,6 +93,17 @@ class WmtsLayer:
     tile_matrix_sets: tuple[str, ...]
     template: str | None
     styles: tuple[str, ...] = ()
+    # Services commonly publish one RESTful template per image format; picking
+    # the first would hand back PNG when the caller asked for JPEG.
+    templates: tuple[tuple[str, str], ...] = ()
+
+    def template_for(self, image_format: str | None) -> str | None:
+        """Return the RESTful template matching a format, if one is published."""
+        wanted = image_format or self.default_format
+        for advertised, template in self.templates:
+            if advertised == wanted:
+                return template
+        return self.template
 
     @property
     def default_format(self) -> str:
@@ -94,6 +133,18 @@ class WmtsCapabilities:
     service_url: str
     title: str
     layers: dict[str, WmtsLayer] = field(default_factory=dict)
+    matrix_sets: dict[str, TileMatrixSetDef] = field(default_factory=dict)
+
+    def tile_matrix_id(self, matrix_set: str, zoom: int) -> str:
+        """Resolve the TileMatrix identifier for a zoom level in a matrix set.
+
+        Falls back to the bare zoom number when the set was not advertised --
+        which happens when the caller overrides the matrix set by hand.
+        """
+        definition = self.matrix_sets.get(matrix_set)
+        if definition is None:
+            return str(zoom)
+        return definition.matrix_for_zoom(zoom) or str(zoom)
 
     def layer(self, identifier: str | None = None) -> WmtsLayer:
         """Return a layer by identifier, or the only one when unambiguous."""
@@ -188,20 +239,33 @@ def parse_wmts_capabilities(xml: str, service_url: str) -> WmtsCapabilities:
             if _text(_child(style, "Identifier"))
         )
 
-        template = None
+        templates: list[tuple[str, str]] = []
         for resource in _children(node, "ResourceURL"):
-            if resource.get("resourceType") == "tile":
-                template = resource.get("template")
-                break
+            if resource.get("resourceType") != "tile":
+                continue
+            template = resource.get("template")
+            if template:
+                templates.append((resource.get("format") or "", template))
 
         capabilities.layers[identifier] = WmtsLayer(
             identifier=identifier,
             title=_text(_child(node, "Title")) or identifier,
             formats=formats,
             tile_matrix_sets=matrix_sets,
-            template=template,
+            template=templates[0][1] if templates else None,
             styles=styles,
+            templates=tuple(templates),
         )
+
+    for node in _children(_descendant(root, "Contents"), "TileMatrixSet"):
+        set_id = _text(_child(node, "Identifier"))
+        matrix_ids = tuple(
+            _text(_child(matrix, "Identifier"))
+            for matrix in _children(node, "TileMatrix")
+            if _text(_child(matrix, "Identifier"))
+        )
+        if set_id and matrix_ids:
+            capabilities.matrix_sets[set_id] = TileMatrixSetDef(set_id, matrix_ids)
 
     if not capabilities.layers:
         raise EndpointDiscoveryError(f"The WMTS capabilities at {service_url} advertise no layers.")
@@ -231,16 +295,21 @@ def wmts_tile_url(
     """
     chosen_format = image_format or layer.default_format
     chosen_style = style or layer.default_style
+    # Never the bare zoom: GeoServer names its levels `EPSG:900913:16` and
+    # answers a bare `16` with `InvalidParameterValue: Unknown TILEMATRIX`.
+    matrix_id = capabilities.tile_matrix_id(matrix_set, tile.z)
 
-    if layer.template:
+    template = layer.template_for(image_format)
+    if template:
         return (
-            layer.template.replace("{TileMatrixSet}", matrix_set)
-            .replace("{TileMatrix}", str(tile.z))
+            template.replace("{TileMatrixSet}", matrix_set)
+            .replace("{TileMatrix}", matrix_id)
             .replace("{TileRow}", str(tile.y))
             .replace("{TileCol}", str(tile.x))
             .replace("{Style}", chosen_style)
             .replace("{style}", chosen_style)
             .replace("{Layer}", layer.identifier)
+            .replace("{layer}", layer.identifier)
         )
 
     return _with_query(
@@ -253,7 +322,7 @@ def wmts_tile_url(
             "STYLE": chosen_style,
             "FORMAT": chosen_format,
             "TILEMATRIXSET": matrix_set,
-            "TILEMATRIX": str(tile.z),
+            "TILEMATRIX": matrix_id,
             "TILEROW": str(tile.y),
             "TILECOL": str(tile.x),
         },

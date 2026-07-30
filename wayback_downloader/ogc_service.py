@@ -35,6 +35,7 @@ from wayback_downloader.models import BoundingBox, Coordinate
 from wayback_downloader.utils.cache import CacheStore
 from wayback_downloader.utils.http import AsyncHttpClient
 from wayback_downloader.utils.logger import get_logger
+from wayback_downloader.utils.naming import safe_stem
 from wayback_downloader.utils.progress import NullProgress, ProgressReporter
 
 logger = get_logger(__name__)
@@ -179,7 +180,7 @@ class OgcService:
         bounds = grid_bounds(grid)
 
         suffix = _FORMAT_SUFFIX.get(image_format or layer.default_format, "png")
-        name = stem or f"wmts_{layer.identifier}_{zoom}"
+        name = stem or safe_stem(f"wmts_{layer.identifier}_{zoom}", "wmts")
         return await self._write(
             image,
             bounds,
@@ -293,7 +294,7 @@ class OgcService:
         image = await asyncio.to_thread(compose)
 
         suffix = _FORMAT_SUFFIX.get(image_format, "png")
-        name = stem or f"wms_{layers.replace(',', '_')}"
+        name = stem or safe_stem(f"wms_{layers}", "wms")
         return await self._write(
             image,
             bbox,

@@ -12,6 +12,7 @@ from typing import Any
 from wayback_downloader.exceptions import ValidationError
 from wayback_downloader.models import Coordinate
 from wayback_downloader.utils.logger import get_logger
+from wayback_downloader.utils.naming import safe_stem
 from wayback_downloader.utils.validator import validate_coordinate, validate_date
 
 logger = get_logger(__name__)
@@ -72,8 +73,7 @@ def _build_entry(row: dict[str, Any], index: int, source: str) -> BatchEntry:
 
 def _sanitize_name(name: str) -> str:
     """Reduce a label to characters that are safe in a filename."""
-    cleaned = "".join(char if char.isalnum() or char in "-_." else "_" for char in name.strip())
-    return cleaned.strip("_.") or "point"
+    return safe_stem(name, fallback="point")
 
 
 def read_csv(path: Path) -> list[BatchEntry]:
