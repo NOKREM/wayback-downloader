@@ -1,5 +1,9 @@
 # Wayback Downloader
 
+[![CI](https://github.com/NOKREM/wayback-downloader/actions/workflows/ci.yml/badge.svg)](https://github.com/NOKREM/wayback-downloader/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+
 A production-ready CLI for downloading historical satellite imagery from the
 [Esri Living Atlas World Imagery Wayback](https://livingatlas.arcgis.com/wayback/)
 archive — every version of the World Imagery basemap published since 2014.
@@ -186,7 +190,6 @@ pip install -r requirements-optional.txt
 | `rasterio` | True GeoTIFF output (otherwise TIFF + `.tfw` + `.prj` world files) |
 | `imageio[ffmpeg]` | MP4 time-lapse (`--mp4`) |
 | `mercantile`, `pyproj` | Cross-checks the in-house tile/projection maths in tests |
-| `shapely` | Extra geometry operations |
 
 Installing `mercantile` and `pyproj` un-skips two tests that validate the
 in-house tile addressing and Web Mercator transforms against those reference
@@ -453,7 +456,7 @@ wayback_downloader/
 │   ├── inputs.py     CSV / GeoJSON batch parsing
 │   └── logger.py     Rich logging
 │
-└── tests/            89 unit tests
+└── tests/            158 unit tests, all offline
 ```
 
 ### Use as a library

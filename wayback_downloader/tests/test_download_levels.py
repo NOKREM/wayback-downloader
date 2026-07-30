@@ -45,20 +45,20 @@ class _StubService(WaybackService):
         self.settings.output_dir = tmp_path
         self.downloaded: list[tuple[int, str, str]] = []
 
-    async def list_versions(self, coordinate, zoom, only_local_changes=True):  # type: ignore[override]
+    async def list_versions(self, coordinate, zoom, only_local_changes=True):
         """Return the canned release list for a zoom level."""
         if zoom not in AVAILABILITY:
             raise ImageryUnavailableError(f"no imagery at zoom {zoom}")
         return [make_release(date) for date in reversed(AVAILABILITY[zoom])]
 
-    async def download_release(  # type: ignore[override]
+    async def download_release(
         self, release, request, output_dir=None, filename_stem=None, write_geotiff=False
     ):
         """Record the call instead of performing a download."""
         self.downloaded.append(
             (request.zoom, release.release_date.isoformat(), filename_stem or "")
         )
-        return filename_stem  # type: ignore[return-value]
+        return filename_stem
 
 
 def make_request(requested_date: dt.date = dt.date(2022, 4, 15)) -> DownloadRequest:

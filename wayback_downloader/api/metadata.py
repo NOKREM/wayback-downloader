@@ -14,6 +14,7 @@ often report a resolution band the user is not looking at.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from typing import Any
 
@@ -46,6 +47,27 @@ def _to_int(value: Any) -> int | None:
     """Coerce a service attribute to an int, tolerating nulls and blanks."""
     parsed = _to_float(value)
     return int(parsed) if parsed is not None else None
+
+
+def _to_date(value: Any) -> dt.date | None:
+    """Parse the service's compact ``YYYYMMDD`` acquisition date.
+
+    Also accepts an ISO date, so a record that ever switches format keeps
+    working. Anything unrecognisable becomes ``None`` rather than raising --
+    metadata is advisory and must never fail a download.
+    """
+    text = _clean(value)
+    if text is None:
+        return None
+    if len(text) == 8 and text.isdigit():
+        try:
+            return dt.date(int(text[:4]), int(text[4:6]), int(text[6:]))
+        except ValueError:
+            return None
+    try:
+        return dt.date.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def _clean(value: Any) -> str | None:
@@ -108,7 +130,7 @@ class MetadataClient:
             provider=_clean(attributes.get("NICE_DESC")),
             product=_clean(attributes.get("NICE_NAME")),
             sensor=_clean(attributes.get("SRC_DESC")),
-            acquisition_date=_clean(attributes.get("SRC_DATE")),
+            acquisition_date=_to_date(attributes.get("SRC_DATE")),
             source_resolution_m=_to_float(attributes.get("SRC_RES")),
             sampled_resolution_m=_to_float(attributes.get("SAMP_RES")),
             accuracy_m=_to_float(attributes.get("SRC_ACC")),

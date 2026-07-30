@@ -97,11 +97,11 @@ class _StubCatalog(WaybackCatalog):
         )
         self._releases = list(RELEASES)
 
-    async def load(self):  # type: ignore[override]
+    async def load(self):
         """Return the seeded endpoints and releases without any network access."""
         return self._endpoints, self._releases
 
-    async def probe_all(self, releases, tile, on_progress=None):  # type: ignore[override]
+    async def probe_all(self, releases, tile, on_progress=None):
         """Return the canned probe results."""
         return {
             release.release_num: TilemapProbe(

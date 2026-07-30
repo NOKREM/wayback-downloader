@@ -15,6 +15,7 @@ from rich.progress import (
     MofNCompleteColumn,
     Progress,
     SpinnerColumn,
+    TaskID,
     TextColumn,
     TimeElapsedColumn,
 )
@@ -57,7 +58,7 @@ class NullProgress:
 class _RichTask:
     """Adapts a Rich task id to the :class:`ProgressTask` interface."""
 
-    def __init__(self, progress: Progress, task_id: int) -> None:
+    def __init__(self, progress: Progress, task_id: TaskID) -> None:
         """Bind the handle to a Rich progress instance and task id."""
         self._progress = progress
         self._task_id = task_id

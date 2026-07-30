@@ -52,7 +52,7 @@ def test_gif_has_one_frame_per_input(tmp_path: Path) -> None:
     """The GIF contains exactly the frames it was given."""
     path = write_gif(make_frames(5), tmp_path / "out.gif", fps=2)
     with Image.open(path) as gif:
-        assert gif.n_frames == 5
+        assert getattr(gif, "n_frames") == 5
         assert gif.size == (64, 48)
 
 
@@ -63,7 +63,7 @@ def test_gif_normalises_mismatched_frame_sizes(tmp_path: Path) -> None:
     path = write_gif(frames, tmp_path / "out.gif")
     with Image.open(path) as gif:
         assert gif.size == (64, 48)
-        assert gif.n_frames == 3
+        assert getattr(gif, "n_frames") == 3
 
 
 def test_empty_animation_is_rejected(tmp_path: Path) -> None:

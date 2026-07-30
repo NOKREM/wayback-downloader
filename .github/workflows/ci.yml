@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The core install: no compiled geospatial stack, which is the configuration
+  # most users will actually have. The tests that need optional packages skip
+  # themselves here and are covered by the `optional` job below.
+  test:
+    name: Test (core, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Check formatting
+        run: black --check --diff wayback_downloader main.py
+
+      - name: Type check
+        run: mypy wayback_downloader
+
+      - name: Run tests
+        run: pytest -q
+
+  # Exercises the code paths that only run when the optional extras are
+  # present: the rasterio GeoTIFF writer, MP4 encoding, and the pyproj and
+  # mercantile cross-checks of the in-house projection and tile maths.
+  optional:
+    name: Test (with optional extras)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-optional.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt -r requirements-optional.txt
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Fail if any test skipped
+        # With every extra installed nothing should skip. A skip here means an
+        # optional dependency silently failed to import.
+        run: pytest -q -rs 2>&1 | tee out.txt && ! grep -q "skipped" out.txt
+
+  # The package must be installable and its console script runnable without
+  # the repository checkout -- this is what caught output/cache defaulting to
+  # the package directory instead of the user's.
+  install:
+    name: Install and smoke-test the CLI
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the package
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      # Run from outside the checkout: with the repository as the working
+      # directory Python would import the local source tree instead of the
+      # installed package, and this job would silently test nothing.
+      - name: Run the CLI from a clean directory
+        working-directory: /tmp
+        run: |
+          wayback --version
+          wayback --help
+          wayback download --help
+
+      - name: Assert nothing was written into site-packages
+        working-directory: /tmp
+        run: |
+          site="$(python -c 'import wayback_downloader,pathlib;print(pathlib.Path(wayback_downloader.__file__).parent.parent)')"
+          echo "resolved install root: $site"
+          case "$site" in
+            "$GITHUB_WORKSPACE"*)
+              echo "::error::imported the checkout, not the installed package"
+              exit 1 ;;
+          esac
+          if [ -e "$site/output" ] || [ -e "$site/.cache" ]; then
+            echo "::error::the package wrote into its own installation directory"
+            exit 1
+          fi

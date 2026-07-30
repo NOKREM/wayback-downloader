@@ -30,6 +30,20 @@ def validate_coordinate(latitude: float, longitude: float) -> Coordinate:
         raise ValidationError(f"Invalid coordinate ({latitude}, {longitude}): {detail}") from exc
 
 
+def _parse_date_text(text: str) -> dt.date:
+    """Parse a date string against every accepted format.
+
+    Split out from :func:`validate_date` so that function never has to hold a
+    possibly-``None`` date, which is what the sanity checks below assume.
+    """
+    for fmt in _DATE_FORMATS:
+        try:
+            return dt.datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    raise ValidationError(f"Invalid date {text!r}. Expected YYYY-MM-DD (for example 2021-05-14).")
+
+
 def validate_date(value: str | dt.date) -> dt.date:
     """Parse and sanity-check a requested date.
 
@@ -42,18 +56,7 @@ def validate_date(value: str | dt.date) -> dt.date:
     elif isinstance(value, dt.date):
         parsed = value
     else:
-        text = value.strip()
-        parsed = None  # type: ignore[assignment]
-        for fmt in _DATE_FORMATS:
-            try:
-                parsed = dt.datetime.strptime(text, fmt).date()
-                break
-            except ValueError:
-                continue
-        if parsed is None:
-            raise ValidationError(
-                f"Invalid date {value!r}. Expected YYYY-MM-DD (for example 2021-05-14)."
-            )
+        parsed = _parse_date_text(value.strip())
 
     today = dt.date.today()
     if parsed < MIN_WAYBACK_DATE:

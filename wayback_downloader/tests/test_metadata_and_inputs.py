@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from wayback_downloader.api.metadata import select_best_record
+from wayback_downloader.api.metadata import _to_date, select_best_record
 from wayback_downloader.exceptions import ValidationError
 from wayback_downloader.models import ImageryMetadata
 from wayback_downloader.utils.inputs import read_batch, read_csv, read_geojson
@@ -22,17 +22,24 @@ def record(layer_id: int, low: int, high: int, name: str) -> dict:
     }
 
 
+def chosen_name(results: list[dict], zoom: int) -> str:
+    """Return the product name of the record selected for a zoom level."""
+    best = select_best_record(results, zoom)
+    assert best is not None
+    return str(best["attributes"]["NICE_NAME"])
+
+
 def test_picks_the_band_covering_the_zoom() -> None:
     """The record whose level range contains the zoom wins."""
     results = [record(4, 19, 19, "Metro"), record(5, 12, 18, "Vivid")]
-    assert select_best_record(results, 17)["attributes"]["NICE_NAME"] == "Vivid"
-    assert select_best_record(results, 19)["attributes"]["NICE_NAME"] == "Metro"
+    assert chosen_name(results, 17) == "Vivid"
+    assert chosen_name(results, 19) == "Metro"
 
 
 def test_falls_back_to_the_closest_band() -> None:
     """With no exact match the nearest level range is used."""
     results = [record(4, 20, 22, "High"), record(5, 5, 8, "Low")]
-    assert select_best_record(results, 10)["attributes"]["NICE_NAME"] == "Low"
+    assert chosen_name(results, 10) == "Low"
 
 
 def test_no_results_yields_none() -> None:
@@ -42,7 +49,23 @@ def test_no_results_yields_none() -> None:
 
 def test_compact_acquisition_date_is_parsed() -> None:
     """The service's YYYYMMDD acquisition date is converted to a real date."""
-    metadata = ImageryMetadata(acquisition_date="20241029")
+    assert _to_date("20241029") == dt.date(2024, 10, 29)
+
+
+def test_iso_acquisition_date_is_accepted() -> None:
+    """An ISO date is parsed too, so a format change keeps working."""
+    assert _to_date("2024-10-29") == dt.date(2024, 10, 29)
+
+
+@pytest.mark.parametrize("value", [None, "", "Null", "not-a-date", "20241340"])
+def test_unusable_acquisition_date_becomes_none(value: object) -> None:
+    """Metadata is advisory, so a bad date degrades instead of raising."""
+    assert _to_date(value) is None
+
+
+def test_metadata_model_takes_a_real_date() -> None:
+    """The model itself stays strictly typed once the value is parsed."""
+    metadata = ImageryMetadata(acquisition_date=_to_date("20241029"))
     assert metadata.acquisition_date == dt.date(2024, 10, 29)
 
 

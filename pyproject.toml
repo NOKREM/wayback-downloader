@@ -17,11 +17,10 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "diskcache>=5.6",
-    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
-geo = ["mercantile>=1.2", "pyproj>=3.6", "shapely>=2.0", "rasterio>=1.3"]
+geo = ["mercantile>=1.2", "pyproj>=3.6", "rasterio>=1.3"]
 video = ["imageio[ffmpeg]>=2.34"]
 dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "black>=24.4", "mypy>=1.10", "respx>=0.21"]
 

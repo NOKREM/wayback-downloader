@@ -265,14 +265,6 @@ class ImageryMetadata(BaseModel):
     min_zoom: int | None = None
     max_zoom: int | None = None
 
-    @field_validator("acquisition_date", mode="before")
-    @classmethod
-    def _parse_compact_date(cls, value: Any) -> Any:
-        """Accept the service's compact ``YYYYMMDD`` acquisition date format."""
-        if isinstance(value, str) and len(value) == 8 and value.isdigit():
-            return dt.date(int(value[:4]), int(value[4:6]), int(value[6:]))
-        return value
-
 
 class DownloadRequest(BaseModel):
     """A fully validated user request for one image."""

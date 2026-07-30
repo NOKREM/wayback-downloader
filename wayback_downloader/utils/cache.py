@@ -21,7 +21,7 @@ try:  # pragma: no cover - exercised implicitly by the import
 
     _HAS_DISKCACHE = True
 except ImportError:  # pragma: no cover
-    _DiskCache = None  # type: ignore[assignment]
+    _DiskCache = None
     _HAS_DISKCACHE = False
 
 

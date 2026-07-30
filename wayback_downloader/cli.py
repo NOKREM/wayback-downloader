@@ -64,20 +64,30 @@ _STATE: dict[str, bool] = {"verbose": False, "quiet": False, "cache": True}
 _SAMPLE_TILE = TileIndex(z=0, x=0, y=0)
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show debug logging.")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Only report errors.")] = False,
     no_cache: Annotated[bool, typer.Option("--no-cache", help="Bypass the on-disk cache.")] = False,
     version: Annotated[bool, typer.Option("--version", help="Print the version and exit.")] = False,
 ) -> None:
-    """Configure global options shared by every command."""
+    """Configure global options shared by every command.
+
+    Declared ``invoke_without_command`` so that ``--version`` works on its own;
+    otherwise the group would reject the call for having no subcommand before
+    this ever ran.
+    """
     if version:
         console.print(f"wayback-downloader {__version__}")
         raise typer.Exit()
 
     configure_logging(verbose=verbose, quiet=quiet)
     _STATE.update(verbose=verbose, quiet=quiet, cache=not no_cache)
+
+    if ctx.invoked_subcommand is None:
+        console.print(ctx.get_help())
+        raise typer.Exit()
 
 
 def _make_service() -> WaybackService:

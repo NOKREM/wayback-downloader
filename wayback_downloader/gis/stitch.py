@@ -33,8 +33,9 @@ def stitch_tiles(
         if not payload:
             continue
         try:
-            with Image.open(io.BytesIO(payload)) as tile:
-                tile.load()
+            with Image.open(io.BytesIO(payload)) as opened:
+                opened.load()
+                tile: Image.Image = opened
                 if tile.size != (grid.tile_size, grid.tile_size):
                     tile = tile.resize((grid.tile_size, grid.tile_size), Image.Resampling.LANCZOS)
                 mosaic.paste(tile.convert("RGBA"), (offset_x, offset_y))
