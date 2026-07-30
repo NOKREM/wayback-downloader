@@ -1,0 +1,10 @@
+# Optional extras. The core downloader works without any of these.
+# Install only what you need. All of these resolve on CPython 3.14 as of
+# 2026-07; a package without a wheel for your interpreter will need a compiler.
+
+mercantile>=1.2       # cross-check tile math against a reference implementation
+pyproj>=3.6           # high-accuracy datum/CRS transforms
+shapely>=2.0          # geometry ops for bbox / GeoJSON input
+rasterio>=1.3         # GeoTIFF output
+imageio[ffmpeg]>=2.34 # MP4 time-lapse output
+aiohttp>=3.9          # alternative async transport

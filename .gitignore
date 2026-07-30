@@ -1,0 +1,24 @@
+# Virtualenvs and bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Generated imagery, metadata sidecars and animations
+output/
+
+# Caches (the tile cache now lives in the per-user cache dir, but older
+# checkouts kept it here)
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration and secrets
+.env
+.claude/settings.local.json
+
+# Packaging artifacts
+*.egg-info/
+build/
+dist/
