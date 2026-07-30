@@ -357,6 +357,43 @@ CSV columns are matched case-insensitively and accept aliases including
 `lat`/`latitude`/`y`/`enlem` and `lon`/`lng`/`longitude`/`x`/`boylam`.
 Per-row `date` and `zoom` columns override the command-line defaults.
 
+### Any other WMTS or WMS service
+
+Wayback is one WMTS deployment; the same downloader talks to any compliant
+service. Everything below the protocol — the Web Mercator maths, the tile
+planner, the mosaicker, the encoder — is shared.
+
+```bash
+# What does this service publish?
+python main.py wmts https://example.org/wmts --list-layers
+
+# Download from it, centred on a coordinate
+python main.py wmts https://example.org/wmts --layer aerial_2024 \
+  --lat 38.7992 --lon 26.9723 --zoom 18 --size 1024
+
+# WMS, by bounding box. Requests too large for one GetMap are split and rejoined.
+python main.py wms https://example.org/wms --layers ortho \
+  --west 26.965 --south 38.795 --east 26.980 --north 38.805 --size 4096
+```
+
+`--list-layers` marks which layers sit on a Web Mercator tile matrix set —
+those are the ones this tool can address directly. A layer in another
+projection is reported rather than silently mis-tiled.
+
+Two details that bite in practice, both pinned by tests:
+
+* **WMS 1.3.0 flipped the axis order.** EPSG:4326 became latitude-first, where
+  1.1.1 was longitude-first. Getting it wrong returns imagery from somewhere
+  else entirely, with a perfectly healthy HTTP 200.
+* **Namespace URIs vary.** The parser matches element local names rather than
+  namespace URIs, because real services disagree with the standard — Esri's own
+  Wayback WMTS declares `https://www.opengis.net/wmts/1.0` where OGC specifies
+  `http://`, and a URI-keyed parser silently finds no layers in it.
+
+The generic path is verified against the real Wayback WMTS endpoint: the same
+release fetched through the capabilities-driven client and through the native
+config-driven client comes back byte-identical.
+
 ### Cache and diagnostics
 
 ```bash
@@ -505,6 +542,30 @@ asyncio.run(main())
 * Optional pacing floor (`WAYBACK_MIN_REQUEST_INTERVAL`) for extra politeness
 * Persistent disk cache: tiles 7 days, catalog 6 hours, metadata 1 day
 * Progress bars for both the version probe and the tile download
+
+**Async and threads together.** Downloading is I/O-bound and runs on the event
+loop; stitching and encoding are CPU-bound and run on worker threads. Pillow
+releases the GIL, so those threads genuinely parallelise, and a multi-image run
+overlaps one image's encode with the next image's downloads.
+
+Measured, 9 images at 2048px with a warm cache:
+
+| `WAYBACK_ENCODE_WORKERS` | Wall time |
+|---|---|
+| 1 (serial) | 18.4 s |
+| 2 | 4.6 s |
+| 4 (default) | 3.3 s |
+
+Encoding dominates: on a 2048x2048 mosaic, stitching takes 46 ms and PNG
+encoding 535 ms. Lower `WAYBACK_ENCODE_WORKERS` on a memory-constrained
+machine, since each in-flight mosaic holds its full RGBA bitmap (~16 MB at
+2048px, ~67 MB at 4096px).
+
+PNG is written at zlib level 6 rather than Pillow's `optimize=True`. On
+satellite imagery `optimize` is a double loss — measured at 1522 ms for
+9.31 MiB against 535 ms for 8.68 MiB — because its palette search cannot help
+photographic data. JPEG keeps `optimize`, where it costs ~6x the encode time
+but does buy ~10% on size.
 
 ---
 

@@ -7,6 +7,7 @@ into an image cropped exactly around the requested coordinate.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from PIL import Image
@@ -94,7 +95,9 @@ class ImageryService:
             grid.z,
         )
         tiles, stats = await self._downloader.download_grid(release, grid, on_progress)
-        image = stitch.build_image(grid, tiles)
+        # Decoding and pasting hundreds of tiles is CPU work that would
+        # otherwise stall every other coroutine on the loop.
+        image = await asyncio.to_thread(stitch.build_image, grid, tiles)
 
         return RenderedImage(
             image=image,

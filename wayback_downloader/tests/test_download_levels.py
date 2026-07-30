@@ -51,14 +51,20 @@ class _StubService(WaybackService):
             raise ImageryUnavailableError(f"no imagery at zoom {zoom}")
         return [make_release(date) for date in reversed(AVAILABILITY[zoom])]
 
-    async def download_release(
+    # Stubs the two halves of a download separately, mirroring the pipeline in
+    # `download_many`: the network half is faked, the CPU half passes through.
+    async def _fetch(
         self, release, request, output_dir=None, filename_stem=None, write_geotiff=False
     ):
-        """Record the call instead of performing a download."""
+        """Record the call instead of fetching anything."""
         self.downloaded.append(
             (request.zoom, release.release_date.isoformat(), filename_stem or "")
         )
         return filename_stem
+
+    async def _encode(self, prepared):
+        """Pass the recorded stem straight through as the result."""
+        return prepared
 
 
 def make_request(requested_date: dt.date = dt.date(2022, 4, 15)) -> DownloadRequest:

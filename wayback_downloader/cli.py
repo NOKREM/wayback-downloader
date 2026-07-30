@@ -14,7 +14,12 @@ from rich.table import Table
 from wayback_downloader import __version__
 from wayback_downloader.api.wayback import filter_by_date_range
 from wayback_downloader.config import get_settings
-from wayback_downloader.exceptions import ImageryUnavailableError, WaybackError
+from wayback_downloader.exceptions import (
+    ImageryUnavailableError,
+    ValidationError,
+    WaybackError,
+)
+from wayback_downloader.ogc_service import OgcService
 from wayback_downloader.models import Coordinate, DownloadRequest, TileIndex
 from wayback_downloader.service import DownloadResult, WaybackService
 from wayback_downloader.utils.cache import CacheStore
@@ -90,10 +95,14 @@ def main(
         raise typer.Exit()
 
 
+def _progress() -> NullProgress | RichProgress:
+    """Pick the progress reporter matching the global flags."""
+    return NullProgress() if _STATE["quiet"] else RichProgress()
+
+
 def _make_service() -> WaybackService:
     """Build a service honouring the global CLI flags."""
-    progress = NullProgress() if _STATE["quiet"] else RichProgress()
-    return WaybackService(use_cache=_STATE["cache"], progress=progress)
+    return WaybackService(use_cache=_STATE["cache"], progress=_progress())
 
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -656,6 +665,141 @@ def batch(
             console.print(
                 f"\n[success]{succeeded}/{len(entries)} coordinate(s) downloaded.[/success]"
             )
+
+    _run(run())
+
+
+@app.command()
+@handle_errors
+def wmts(
+    service_url: Annotated[str, typer.Argument(help="WMTS service or GetCapabilities URL.")],
+    lat: Annotated[
+        Optional[float], typer.Option("--lat", help="Latitude in WGS84 degrees.")
+    ] = None,
+    lon: Annotated[
+        Optional[float], typer.Option("--lon", help="Longitude in WGS84 degrees.")
+    ] = None,
+    layer: Annotated[
+        Optional[str], typer.Option("--layer", help="Layer identifier. Omit if only one exists.")
+    ] = None,
+    zoom: ZoomOption = 16,
+    size: SizeOption = "1024",
+    matrix_set: Annotated[
+        Optional[str], typer.Option("--matrix-set", help="Tile matrix set to use.")
+    ] = None,
+    image_format: Annotated[
+        Optional[str], typer.Option("--tile-format", help="MIME type, e.g. image/png.")
+    ] = None,
+    style: Annotated[Optional[str], typer.Option("--style", help="Layer style identifier.")] = None,
+    output: OutputOption = None,
+    list_layers: Annotated[
+        bool, typer.Option("--list-layers", help="List the service's layers and exit.")
+    ] = False,
+) -> None:
+    """Download imagery from any WMTS service, or list what it publishes."""
+
+    async def run() -> None:
+        async with OgcService(use_cache=_STATE["cache"], progress=_progress()) as service:
+            capabilities = await service.capabilities(service_url)
+
+            if list_layers:
+                table = Table(title=f"{capabilities.title} -- {len(capabilities.layers)} layer(s)")
+                table.add_column("Identifier", style="cyan")
+                table.add_column("Title")
+                table.add_column("Formats", style="dim")
+                table.add_column("Matrix sets", style="dim")
+                table.add_column("XYZ", justify="center")
+                for item in sorted(capabilities.layers.values(), key=lambda l: l.identifier):
+                    usable = item.web_mercator_matrix_set() is not None
+                    table.add_row(
+                        item.identifier,
+                        item.title[:40],
+                        ", ".join(item.formats)[:28] or "-",
+                        ", ".join(item.tile_matrix_sets)[:28] or "-",
+                        "[success]*[/success]" if usable else "[muted]-[/muted]",
+                    )
+                console.print(table)
+                console.print(
+                    "[muted]'*' marks layers on a Web Mercator matrix set, "
+                    "which this tool can download directly.[/muted]"
+                )
+                return
+
+            if lat is None or lon is None:
+                raise ValidationError("--lat and --lon are required unless --list-layers is used.")
+
+            coordinate = validate_coordinate(lat, lon)
+            width, height = parse_size(size)
+            result = await service.download_wmts(
+                service_url,
+                coordinate,
+                validate_zoom(zoom),
+                width,
+                height,
+                layer_id=layer,
+                matrix_set=matrix_set,
+                image_format=image_format,
+                style=style,
+                output_dir=output,
+            )
+            console.print(f"\n[success]Saved[/success] {result.image_path}")
+            print_kv("Service", capabilities.title)
+            print_kv("Requests", result.request_count)
+            print_kv("Image size", f"{result.image.width}x{result.image.height}")
+            print_kv("Metadata", result.metadata_path.name)
+
+    _run(run())
+
+
+@app.command()
+@handle_errors
+def wms(
+    service_url: Annotated[str, typer.Argument(help="WMS service endpoint URL.")],
+    layers: Annotated[str, typer.Option("--layers", help="Comma-separated layer names.")],
+    west: Annotated[float, typer.Option("--west", help="Western longitude.")],
+    south: Annotated[float, typer.Option("--south", help="Southern latitude.")],
+    east: Annotated[float, typer.Option("--east", help="Eastern longitude.")],
+    north: Annotated[float, typer.Option("--north", help="Northern latitude.")],
+    size: SizeOption = "1024",
+    version: Annotated[
+        str, typer.Option("--wms-version", help="WMS version: 1.3.0 or 1.1.1.")
+    ] = "1.3.0",
+    image_format: Annotated[
+        str, typer.Option("--tile-format", help="MIME type, e.g. image/png.")
+    ] = "image/jpeg",
+    styles: Annotated[str, typer.Option("--styles", help="Comma-separated style names.")] = "",
+    transparent: Annotated[
+        bool, typer.Option("--transparent", help="Request a transparent background.")
+    ] = False,
+    output: OutputOption = None,
+) -> None:
+    """Download a bounding box from any WMS service.
+
+    Requests larger than a single GetMap allows are split and reassembled.
+    """
+    box = validate_bbox(west, south, east, north)
+    width, height = parse_size(size)
+    if version not in {"1.3.0", "1.1.1"}:
+        raise ValidationError(f"Unsupported WMS version {version!r}; use 1.3.0 or 1.1.1.")
+
+    async def run() -> None:
+        async with OgcService(use_cache=_STATE["cache"], progress=_progress()) as service:
+            result = await service.download_wms(
+                service_url,
+                layers,
+                box,
+                width,
+                height,
+                version=version,
+                image_format=image_format,
+                styles=styles,
+                transparent=transparent,
+                output_dir=output,
+            )
+            console.print(f"\n[success]Saved[/success] {result.image_path}")
+            print_kv("GetMap requests", result.request_count)
+            print_kv("Image size", f"{result.image.width}x{result.image.height}")
+            print_kv("Metadata", result.metadata_path.name)
 
     _run(run())
 
