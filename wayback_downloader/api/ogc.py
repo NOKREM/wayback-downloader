@@ -84,9 +84,66 @@ _VECTOR_IMAGE_TYPES = {"image/svg+xml", "image/svg"}
 
 
 def is_raster_format(mime: str) -> bool:
-    """Whether a MIME type names a raster image this tool can decode."""
+    """Whether a MIME type names a raster image this tool can decode.
+
+    This decides *how* a format is downloaded, not whether it can be: a raster
+    is tiled and mosaicked, anything else is fetched in one request and saved
+    verbatim.
+    """
     base = mime.split(";")[0].strip().lower()
     return base.startswith("image/") and base not in _VECTOR_IMAGE_TYPES
+
+
+# File extensions for the formats OGC services commonly publish. Anything not
+# listed falls back to the MIME subtype, which is right often enough.
+_EXTENSIONS = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/gif": "gif",
+    "image/tiff": "tif",
+    "image/geotiff": "tif",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+    "image/svg+xml": "svg",
+    "application/vnd.google-earth.kml+xml": "kml",
+    "application/vnd.google-earth.kmz": "kmz",
+    "application/json": "json",
+    "application/vnd.geo+json": "geojson",
+    "application/pdf": "pdf",
+    "text/html": "html",
+    "text/plain": "txt",
+    "application/atom+xml": "xml",
+}
+
+# Pillow's writer name for each raster type it can encode. A format absent here
+# is decodable but not writable, and is re-encoded as PNG.
+_PILLOW_WRITERS = {
+    "image/png": "PNG",
+    "image/jpeg": "JPEG",
+    "image/jpg": "JPEG",
+    "image/gif": "GIF",
+    "image/tiff": "TIFF",
+    "image/geotiff": "TIFF",
+    "image/webp": "WEBP",
+    "image/bmp": "BMP",
+}
+
+
+def format_extension(mime: str) -> str:
+    """Return the file extension to use for a MIME type."""
+    base = mime.split(";")[0].strip().lower()
+    if base in _EXTENSIONS:
+        return _EXTENSIONS[base]
+
+    subtype = base.rsplit("/", 1)[-1]
+    subtype = subtype.split("+")[0].replace("vnd.", "")
+    return re.sub(r"[^a-z0-9]+", "", subtype) or "bin"
+
+
+def pillow_writer(mime: str) -> str | None:
+    """Return Pillow's writer name for a raster type, or None if unsupported."""
+    return _PILLOW_WRITERS.get(mime.split(";")[0].strip().lower())
 
 
 def normalize_image_format(value: str) -> str:
@@ -108,37 +165,24 @@ def resolve_format(requested: str | None, advertised: Sequence[str], default: st
     an HTTP 200 and would otherwise surface as a corrupt tile -- into an error
     naming the formats that would have worked.
 
-    A format the service does offer but this tool cannot mosaic is rejected the
-    same way: the output pipeline decodes to a bitmap, so KML, KMZ, SVG and the
-    HTML viewers advertised alongside the images cannot produce an image.
+    Every advertised format is downloadable. Rasters are tiled and mosaicked;
+    anything else -- KML, KMZ, SVG, the HTML viewers -- is fetched in a single
+    request and written out verbatim.
     """
     if requested is None:
         return default
 
     wanted = normalize_image_format(requested)
-    chosen = wanted
-    if advertised:
-        for option in advertised:
-            if option.strip().lower() == wanted.lower():
-                chosen = option
-                break
-        else:
-            raise ValidationError(
-                f"Format {requested!r} is not offered here. Available: {', '.join(advertised)}"
-            )
+    if not advertised:
+        return wanted
 
-    if not is_raster_format(chosen):
-        rasters = [option for option in advertised if is_raster_format(option)]
-        raise ValidationError(
-            f"Format {requested!r} is not a raster image, and this tool builds raster "
-            "mosaics. "
-            + (
-                f"Raster formats offered here: {', '.join(rasters)}"
-                if rasters
-                else "This service advertises no raster formats."
-            )
-        )
-    return chosen
+    for option in advertised:
+        if option.strip().lower() == wanted.lower():
+            return option
+
+    raise ValidationError(
+        f"Format {requested!r} is not offered here. Available: {', '.join(advertised)}"
+    )
 
 
 @dataclass(frozen=True)
@@ -746,7 +790,7 @@ class OgcClient:
         response = await self._get(url, "text/xml,application/xml,*/*", "WMS capabilities")
         return parse_wms_capabilities(response.text, service_url)
 
-    async def fetch_image(self, url: str, description: str) -> bytes:
+    async def fetch_image(self, url: str, description: str, expect_raster: bool = True) -> bytes:
         """Fetch an image, rejecting an XML service exception dressed as a tile.
 
         OGC servers report errors as XML with a 200 status, so a response that
@@ -771,13 +815,14 @@ class OgcClient:
                 f"{description} returned a service exception: {describe_service_error(response)}"
             )
 
-        # Services advertise plenty of non-raster GetMap formats -- KML, KMZ,
-        # SVG, HTML viewers. Those return successfully and then fail inside the
-        # image decoder, so reject them here with the reason.
-        base_type = content_type.split(";")[0].strip()
-        if base_type and not is_raster_format(base_type):
-            raise ValidationError(
-                f"{description} returned {base_type!r}, which is not a raster image. "
-                "This tool builds raster mosaics -- choose a format such as png or jpg."
-            )
+        if expect_raster:
+            # Reached only when a raster was requested. A non-image reply here
+            # means the service ignored the requested format, and the bytes
+            # would fail deep inside the decoder rather than at the boundary.
+            base_type = content_type.split(";")[0].strip()
+            if base_type and not is_raster_format(base_type):
+                raise ValidationError(
+                    f"{description} returned {base_type!r} when a raster image was "
+                    "requested. The service may not honour that format."
+                )
         return response.content

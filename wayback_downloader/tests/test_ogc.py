@@ -12,8 +12,10 @@ from wayback_downloader.api.ogc import (
     WmsLayer,
     WmtsCapabilities,
     WmtsLayer,
+    format_extension,
     is_raster_format,
     normalize_image_format,
+    pillow_writer,
     parse_wms_capabilities,
     parse_wmts_capabilities,
     resolve_format,
@@ -510,26 +512,76 @@ def test_non_raster_formats_are_recognised(mime: str) -> None:
     assert is_raster_format(mime) is False
 
 
-def test_advertised_but_unusable_format_is_refused_with_the_alternatives() -> None:
-    """A format the service offers but this tool cannot mosaic is rejected.
+def test_every_advertised_format_is_downloadable() -> None:
+    """A non-raster format is accepted; it changes how, not whether.
 
-    Services publish KML and HTML viewers from the same GetMap operation as
-    their images, so it is offered, valid, and still useless here.
+    Rasters are tiled and mosaicked, everything else is fetched once and
+    written verbatim, so nothing the service offers is off limits.
     """
     advertised = (
         "image/png",
-        "image/jpeg",
         "application/vnd.google-earth.kml+xml",
         "text/html; subtype=openlayers",
     )
-    with pytest.raises(ValidationError) as excinfo:
+    assert (
         resolve_format("application/vnd.google-earth.kml+xml", advertised, "image/png")
+        == "application/vnd.google-earth.kml+xml"
+    )
+    assert resolve_format("text/html; subtype=openlayers", advertised, "image/png") == (
+        "text/html; subtype=openlayers"
+    )
 
-    message = str(excinfo.value)
-    assert "not a raster image" in message
-    assert "image/png, image/jpeg" in message
-    # The alternatives listed must themselves be usable.
-    assert "kml" not in message.split("Raster formats offered here:")[1]
+
+@pytest.mark.parametrize(
+    ("mime", "extension"),
+    [
+        ("image/png", "png"),
+        ("image/jpeg", "jpg"),
+        ("image/gif", "gif"),
+        ("image/tiff", "tif"),
+        ("image/geotiff", "tif"),
+        ("image/svg+xml", "svg"),
+        ("application/vnd.google-earth.kml+xml", "kml"),
+        ("application/vnd.google-earth.kmz", "kmz"),
+        ("application/pdf", "pdf"),
+        ("text/html; subtype=openlayers", "html"),
+        ("image/png; mode=8bit", "png"),
+    ],
+)
+def test_extension_matches_the_format(mime: str, extension: str) -> None:
+    """Each format lands on disk with the extension that opens it.
+
+    Verified against a live GeoServer offering all of these.
+    """
+    assert format_extension(mime) == extension
+
+
+def test_unknown_format_derives_an_extension_from_its_subtype() -> None:
+    """An unlisted type still produces something plausible rather than failing."""
+    assert format_extension("image/x-custom") == "xcustom"
+    assert format_extension("application/x-weird+xml") == "xweird"
+
+
+@pytest.mark.parametrize(
+    ("mime", "writer"),
+    [
+        ("image/png", "PNG"),
+        ("image/jpeg", "JPEG"),
+        ("image/gif", "GIF"),
+        ("image/tiff", "TIFF"),
+        ("image/geotiff", "TIFF"),
+        ("image/webp", "WEBP"),
+    ],
+)
+def test_writable_raster_formats_map_to_a_pillow_writer(mime: str, writer: str) -> None:
+    """A requested raster format is preserved on output, not collapsed to PNG."""
+    assert pillow_writer(mime) == writer
+
+
+def test_unwritable_format_has_no_writer() -> None:
+    """A decodable-but-unwritable format reports that, so the caller can fall back."""
+    assert pillow_writer("application/pdf") is None
+    assert pillow_writer("image/svg+xml") is None
 
 
 BOX = BoundingBox(west=26.965, south=38.795, east=26.980, north=38.805)

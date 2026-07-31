@@ -19,7 +19,7 @@ from wayback_downloader.exceptions import (
     ValidationError,
     WaybackError,
 )
-from wayback_downloader.ogc_service import OgcService
+from wayback_downloader.ogc_service import OgcResult, OgcService
 from wayback_downloader.models import Coordinate, DownloadRequest, TileIndex
 from wayback_downloader.service import DownloadResult, WaybackService
 from wayback_downloader.utils.cache import CacheStore
@@ -154,6 +154,25 @@ def _report(result: DownloadResult) -> None:
     print_kv("Metadata", result.metadata_path.name)
     if result.geotiff_path:
         print_kv("GeoTIFF", result.geotiff_path.name)
+
+
+def _report_ogc(result: OgcResult, request_label: str, service: str | None = None) -> None:
+    """Print a summary of an OGC download.
+
+    A non-raster format has no pixel dimensions to report, so the byte size of
+    the written document stands in.
+    """
+    console.print(f"\n[success]Saved[/success] {result.image_path}")
+    if service:
+        print_kv("Service", service)
+    print_kv(request_label, result.request_count)
+
+    size = result.size
+    if size is not None:
+        print_kv("Image size", f"{size[0]}x{size[1]}")
+    else:
+        print_kv("Written", f"{result.image_path.stat().st_size:,} bytes (not rasterised)")
+    print_kv("Metadata", result.metadata_path.name)
 
 
 async def _effective_levels(
@@ -761,11 +780,7 @@ def wmts(
                 style=style,
                 output_dir=output,
             )
-            console.print(f"\n[success]Saved[/success] {result.image_path}")
-            print_kv("Service", capabilities.title)
-            print_kv("Requests", result.request_count)
-            print_kv("Image size", f"{result.image.width}x{result.image.height}")
-            print_kv("Metadata", result.metadata_path.name)
+            _report_ogc(result, "Requests", service=capabilities.title)
 
     _run(run())
 
@@ -883,10 +898,7 @@ def wms(
                 transparent=transparent,
                 output_dir=output,
             )
-            console.print(f"\n[success]Saved[/success] {result.image_path}")
-            print_kv("GetMap requests", result.request_count)
-            print_kv("Image size", f"{result.image.width}x{result.image.height}")
-            print_kv("Metadata", result.metadata_path.name)
+            _report_ogc(result, "GetMap requests")
 
     _run(run())
 

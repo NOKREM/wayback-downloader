@@ -380,12 +380,27 @@ python main.py wms https://example.org/wms --layers roads,labels \
 ```
 
 `--format` takes `png`, `jpg`, `webp` and friends, or a full MIME type for
-server-specific ones like `image/vnd.jpeg-png`. It is checked against what the
-service advertises **before** anything is downloaded — an unsupported format
-otherwise comes back as an XML service exception carrying HTTP 200, which would
-be pasted into the mosaic as a corrupt tile. Layer names are checked the same
-way, and a non-raster choice (services commonly offer KML and HTML viewers
-alongside images) is rejected with the reason.
+server-specific ones like `image/vnd.jpeg-png`. **Every format a service
+advertises can be downloaded** — what changes is how:
+
+| Requested | How it is fetched | Written as |
+|---|---|---|
+| `png`, `jpg`, `gif`, `tiff`, `webp`, `bmp` | Tiled and mosaicked | The same format |
+| `image/geotiff` | Tiled and mosaicked | GeoTIFF with its extent embedded |
+| `svg`, `kml`, `kmz`, `pdf`, `html`, … | One request, no decoding | The bytes, verbatim |
+
+Non-raster formats describe the whole extent in a single document, so there is
+nothing to tile or stitch and the response is written through untouched. For
+WMTS, where tiles are the unit, each non-raster tile is saved separately into a
+directory named after the download.
+
+The requested format is also what you get: asking for TIFF used to yield a PNG,
+because everything was re-encoded on the way out.
+
+Layer names and formats are both checked against the capabilities **before**
+anything is downloaded, because an unsupported value otherwise comes back as an
+XML service exception carrying HTTP 200 — which would be pasted into the mosaic
+as a corrupt tile rather than reported:
 
 ```
 Formats offered: image/jpeg, image/png

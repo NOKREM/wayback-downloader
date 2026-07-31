@@ -24,17 +24,21 @@ from wayback_downloader.api.ogc import (
     OgcClient,
     WmsCapabilities,
     WmtsCapabilities,
+    format_extension,
+    is_raster_format,
     normalize_image_format,
+    pillow_writer,
     resolve_format,
     wms_getmap_url,
     wmts_tile_url,
 )
 from wayback_downloader.config import Settings, get_settings
 from wayback_downloader.exceptions import ImageryUnavailableError, ValidationError
+from wayback_downloader.export import geotiff
 from wayback_downloader.gis import stitch
 from wayback_downloader.gis.projection import ground_resolution
 from wayback_downloader.gis.tiles import grid_bounds, plan_grid
-from wayback_downloader.models import BoundingBox, Coordinate
+from wayback_downloader.models import BoundingBox, Coordinate, TileIndex
 from wayback_downloader.utils.cache import CacheStore
 from wayback_downloader.utils.http import AsyncHttpClient
 from wayback_downloader.utils.logger import get_logger
@@ -43,24 +47,25 @@ from wayback_downloader.utils.progress import NullProgress, ProgressReporter
 
 logger = get_logger(__name__)
 
-_FORMAT_SUFFIX = {
-    "image/jpeg": "jpg",
-    "image/jpg": "jpg",
-    "image/png": "png",
-    "image/webp": "webp",
-    "image/tiff": "tif",
-}
-
 
 @dataclass
 class OgcResult:
-    """An image downloaded from an OGC service, plus its sidecar."""
+    """Something downloaded from an OGC service, plus its sidecar.
 
-    image: Image.Image
+    ``image`` is ``None`` for non-raster formats, which are written through
+    unchanged rather than decoded -- there is no bitmap to hand back.
+    """
+
     image_path: Path
     metadata_path: Path
     bounds: BoundingBox
     request_count: int
+    image: Image.Image | None = None
+
+    @property
+    def size(self) -> tuple[int, int] | None:
+        """Pixel dimensions, or ``None`` when nothing was rasterised."""
+        return self.image.size if self.image is not None else None
 
 
 class OgcService:
@@ -151,21 +156,23 @@ class OgcService:
             zoom,
         )
 
+        raster = is_raster_format(chosen_format)
         semaphore = asyncio.Semaphore(self.settings.max_concurrency)
         tiles: dict[tuple[int, int], bytes] = {}
+        addresses: dict[tuple[int, int], TileIndex] = {}
         failures = 0
         lock = asyncio.Lock()
 
         with self.progress.task(f"WMTS tiles z{zoom}", total=len(placements)) as task:
 
-            async def fetch(offset: tuple[int, int], index: object) -> None:
+            async def fetch(offset: tuple[int, int], index: TileIndex) -> None:
                 nonlocal failures
-                url = wmts_tile_url(
-                    capabilities, layer, chosen_set, index, chosen_format, style  # type: ignore[arg-type]
-                )
+                url = wmts_tile_url(capabilities, layer, chosen_set, index, chosen_format, style)
                 try:
                     async with semaphore:
-                        payload = await self.client.fetch_image(url, f"tile {index}")
+                        payload = await self.client.fetch_image(
+                            url, f"tile {index}", expect_raster=raster
+                        )
                 except Exception as exc:
                     async with lock:
                         failures += 1
@@ -173,6 +180,7 @@ class OgcService:
                 else:
                     async with lock:
                         tiles[offset] = payload
+                        addresses[offset] = index
                 task.advance(1)
 
             await asyncio.gather(*(fetch((p.offset_x, p.offset_y), p.index) for p in placements))
@@ -184,17 +192,36 @@ class OgcService:
         if failures:
             logger.warning("%d of %d WMTS tiles failed", failures, len(placements))
 
-        image = await asyncio.to_thread(stitch.build_image, grid, tiles)
         bounds = grid_bounds(grid)
-
-        suffix = _FORMAT_SUFFIX.get(chosen_format, "png")
         name = stem or safe_stem(f"wmts_{layer.identifier}_{zoom}", "wmts")
+
+        if not raster:
+            return self._write_tiles(
+                tiles,
+                addresses,
+                bounds,
+                output_dir,
+                name,
+                chosen_format,
+                {
+                    "service": "WMTS",
+                    "service_url": service_url,
+                    "service_title": capabilities.title,
+                    "layer": layer.identifier,
+                    "tile_matrix_set": chosen_set,
+                    "format": chosen_format,
+                    "zoom": zoom,
+                    "rasterised": False,
+                },
+            )
+
+        image = await asyncio.to_thread(stitch.build_image, grid, tiles)
         return await self._write(
             image,
             bounds,
             output_dir,
             name,
-            suffix,
+            chosen_format,
             len(placements),
             {
                 "service": "WMTS",
@@ -230,11 +257,16 @@ class OgcService:
         stem: str | None = None,
         validate: bool = True,
     ) -> OgcResult:
-        """Download a bounding box from a WMS service.
+        """Download a bounding box from a WMS service, in any offered format.
 
-        A request larger than a server will usually accept is split into a grid
-        of ``GetMap`` calls and reassembled, so the caller can ask for an image
-        far bigger than any single request allows.
+        A raster request larger than a server will usually accept is split into
+        a grid of ``GetMap`` calls and reassembled, so the caller can ask for an
+        image far bigger than any single request allows.
+
+        A non-raster format -- KML, KMZ, SVG, an HTML viewer -- is a single
+        document describing the whole extent. There is nothing to tile or
+        stitch, so one request is made and the bytes are written through
+        untouched.
 
         Unless ``validate`` is disabled, the layer names and the requested
         format are checked against the service's capabilities first. Both would
@@ -250,6 +282,21 @@ class OgcService:
                 capabilities.layer(name)
             chosen_format = resolve_format(
                 image_format, capabilities.formats, capabilities.default_format
+            )
+
+        if not is_raster_format(chosen_format):
+            return await self._download_wms_document(
+                service_url,
+                layers,
+                bbox,
+                width,
+                height,
+                version,
+                chosen_format,
+                styles,
+                transparent,
+                output_dir,
+                stem,
             )
 
         columns = -(-width // MAX_WMS_PIXELS)
@@ -315,14 +362,13 @@ class OgcService:
 
         image = await asyncio.to_thread(compose)
 
-        suffix = _FORMAT_SUFFIX.get(chosen_format, "png")
         name = stem or safe_stem(f"wms_{layers}", "wms")
         return await self._write(
             image,
             bbox,
             output_dir,
             name,
-            suffix,
+            chosen_format,
             total,
             {
                 "service": "WMS",
@@ -334,30 +380,180 @@ class OgcService:
             },
         )
 
+    async def _download_wms_document(
+        self,
+        service_url: str,
+        layers: str,
+        bbox: BoundingBox,
+        width: int,
+        height: int,
+        version: str,
+        image_format: str,
+        styles: str,
+        transparent: bool,
+        output_dir: Path | None,
+        stem: str | None,
+    ) -> OgcResult:
+        """Fetch a non-raster GetMap response and write it out verbatim.
+
+        KML, SVG and the rest describe the whole extent in one document, so
+        splitting the request would produce fragments that cannot be recombined.
+        """
+        url = wms_getmap_url(
+            service_url,
+            layers,
+            bbox,
+            width,
+            height,
+            version=version,
+            image_format=image_format,
+            styles=styles,
+            transparent=transparent,
+        )
+        with self.progress.task("WMS document", total=1) as task:
+            payload = await self.client.fetch_image(url, "GetMap", expect_raster=False)
+            task.advance(1)
+
+        extension = format_extension(image_format)
+        name = stem or safe_stem(f"wms_{layers}", "wms")
+        target = output_dir or self.settings.output_dir
+        target.mkdir(parents=True, exist_ok=True)
+
+        document_path = target / f"{name}.{extension}"
+        document_path.write_bytes(payload)
+        logger.info("Wrote %s (%d bytes, not rasterised)", document_path.name, len(payload))
+
+        return self._write_sidecar(
+            document_path,
+            bbox,
+            1,
+            {
+                "service": "WMS",
+                "service_url": service_url,
+                "layers": layers,
+                "version": version,
+                "format": image_format,
+                "rasterised": False,
+                "request_count": 1,
+                "byte_size": len(payload),
+            },
+        )
+
+    def _write_tiles(
+        self,
+        tiles: dict[tuple[int, int], bytes],
+        addresses: dict[tuple[int, int], TileIndex],
+        bounds: BoundingBox,
+        output_dir: Path | None,
+        stem: str,
+        image_format: str,
+        extra: dict,
+    ) -> OgcResult:
+        """Write non-raster WMTS tiles individually into a directory.
+
+        A KML or SVG tile cannot be pasted into a mosaic, and concatenating the
+        documents would produce nothing valid, so each tile is kept as its own
+        file named by its address.
+        """
+        target = (output_dir or self.settings.output_dir) / stem
+        target.mkdir(parents=True, exist_ok=True)
+        extension = format_extension(image_format)
+
+        for offset, payload in sorted(tiles.items()):
+            index = addresses[offset]
+            (target / f"{index.z}_{index.x}_{index.y}.{extension}").write_bytes(payload)
+
+        logger.info("Wrote %d tile(s) to %s (not rasterised)", len(tiles), target)
+        return self._write_sidecar(
+            target / f"{stem}.{extension}",
+            bounds,
+            len(tiles),
+            {**extra, "tile_count": len(tiles), "tile_directory": str(target)},
+            write_file=False,
+        )
+
+    def _write_sidecar(
+        self,
+        image_path: Path,
+        bounds: BoundingBox,
+        request_count: int,
+        extra: dict,
+        write_file: bool = True,
+    ) -> OgcResult:
+        """Write the JSON sidecar describing a download.
+
+        ``write_file`` is false when the payload is a directory of tiles rather
+        than a single file; ``image_path`` then names only where the sidecar
+        goes and what the download was called.
+        """
+        metadata = {
+            **extra,
+            "bounds_wgs84": {
+                "west": round(bounds.west, 8),
+                "south": round(bounds.south, 8),
+                "east": round(bounds.east, 8),
+                "north": round(bounds.north, 8),
+            },
+            "image_file": image_path.name,
+            "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "tool_version": __version__,
+        }
+        metadata_path = image_path.with_suffix(".json")
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return OgcResult(
+            image_path=image_path,
+            metadata_path=metadata_path,
+            bounds=bounds,
+            request_count=request_count,
+        )
+
+    def _save_raster(self, image: Image.Image, path: Path, mime: str) -> None:
+        """Encode a mosaic in the requested raster format. Runs on a thread."""
+        writer = pillow_writer(mime)
+        if writer in {"PNG", "JPEG"} or writer is None:
+            # The tuned PNG and JPEG paths live in the stitcher; an unwritable
+            # format falls back to PNG rather than failing the download.
+            stitch.save_image(
+                image,
+                path,
+                "jpg" if writer == "JPEG" else "png",
+                self.settings.jpeg_quality,
+                self.settings.png_compress_level,
+            )
+            if writer is None:
+                logger.warning("Cannot encode %s; wrote PNG instead", mime)
+            return
+
+        # GIF and BMP have no alpha, and JPEG-like flattening applies to them.
+        payload = image if writer in {"WEBP", "TIFF"} else image.convert("RGB")
+        payload.save(path, format=writer)
+
     async def _write(
         self,
         image: Image.Image,
         bounds: BoundingBox,
         output_dir: Path | None,
         stem: str,
-        suffix: str,
+        mime: str,
         request_count: int,
         extra: dict,
     ) -> OgcResult:
-        """Write the image and its JSON sidecar."""
+        """Write the mosaic in the requested format, plus its JSON sidecar.
+
+        The output keeps the format that was asked for wherever Pillow can
+        write it, rather than collapsing everything to PNG. A GeoTIFF request
+        goes through the georeferencing writer so the result carries its extent.
+        """
         target = output_dir or self.settings.output_dir
         target.mkdir(parents=True, exist_ok=True)
+        image_path = target / f"{stem}.{format_extension(mime)}"
 
-        image_format = "jpg" if suffix in {"jpg", "jpeg"} else "png"
-        image_path = target / f"{stem}.{image_format}"
-        await asyncio.to_thread(
-            stitch.save_image,
-            image,
-            image_path,
-            image_format,
-            self.settings.jpeg_quality,
-            self.settings.png_compress_level,
-        )
+        if mime.split(";")[0].strip().lower() == "image/geotiff":
+            await asyncio.to_thread(geotiff.write_geotiff, image, bounds, image_path)
+        else:
+            await asyncio.to_thread(self._save_raster, image, image_path, mime)
 
         metadata = {
             **extra,

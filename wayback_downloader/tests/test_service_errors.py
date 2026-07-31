@@ -103,8 +103,8 @@ KML_BODY = (
 )
 
 
-async def test_valid_kml_is_reported_as_non_raster_not_as_an_exception() -> None:
-    """A KML body is a successful response, just not an image.
+async def test_kml_is_returned_not_rejected() -> None:
+    """A KML body is a successful response and is handed back untouched.
 
     KML is XML, so treating every XML body as a service exception reported a
     perfectly valid document as a failure and quoted the KML itself as the
@@ -112,12 +112,20 @@ async def test_valid_kml_is_reported_as_non_raster_not_as_an_exception() -> None
     """
     client = OgcClient(_StubHttp(KML_BODY, "application/vnd.google-earth.kml+xml"))  # type: ignore[arg-type]
 
-    with pytest.raises(ValidationError) as excinfo:
-        await client.fetch_image("https://example.org/wms", "GetMap 0,0")
+    payload = await client.fetch_image("https://example.org/wms", "GetMap", expect_raster=False)
+    assert payload.decode().startswith("<?xml")
 
-    message = str(excinfo.value)
-    assert "not a raster image" in message
-    assert "service exception" not in message
+
+async def test_non_image_reply_to_a_raster_request_is_rejected() -> None:
+    """Asking for a raster and receiving KML means the service ignored us.
+
+    Those bytes would fail deep inside the decoder, so the mismatch is caught
+    at the boundary instead.
+    """
+    client = OgcClient(_StubHttp(KML_BODY, "application/vnd.google-earth.kml+xml"))  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError, match="raster image was requested"):
+        await client.fetch_image("https://example.org/wms", "GetMap", expect_raster=True)
 
 
 async def test_an_actual_exception_document_is_still_detected() -> None:
