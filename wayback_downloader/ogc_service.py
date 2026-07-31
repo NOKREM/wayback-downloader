@@ -24,6 +24,8 @@ from wayback_downloader.api.ogc import (
     OgcClient,
     WmsCapabilities,
     WmtsCapabilities,
+    normalize_image_format,
+    resolve_format,
     wms_getmap_url,
     wmts_tile_url,
 )
@@ -128,6 +130,7 @@ class OgcService:
         """
         capabilities = await self.capabilities(service_url)
         layer = capabilities.layer(layer_id)
+        chosen_format = resolve_format(image_format, layer.formats, layer.default_format)
 
         chosen_set = matrix_set or layer.web_mercator_matrix_set()
         if chosen_set is None:
@@ -158,7 +161,7 @@ class OgcService:
             async def fetch(offset: tuple[int, int], index: object) -> None:
                 nonlocal failures
                 url = wmts_tile_url(
-                    capabilities, layer, chosen_set, index, image_format, style  # type: ignore[arg-type]
+                    capabilities, layer, chosen_set, index, chosen_format, style  # type: ignore[arg-type]
                 )
                 try:
                     async with semaphore:
@@ -184,7 +187,7 @@ class OgcService:
         image = await asyncio.to_thread(stitch.build_image, grid, tiles)
         bounds = grid_bounds(grid)
 
-        suffix = _FORMAT_SUFFIX.get(image_format or layer.default_format, "png")
+        suffix = _FORMAT_SUFFIX.get(chosen_format, "png")
         name = stem or safe_stem(f"wmts_{layer.identifier}_{zoom}", "wmts")
         return await self._write(
             image,
@@ -200,7 +203,7 @@ class OgcService:
                 "layer": layer.identifier,
                 "layer_title": layer.title,
                 "tile_matrix_set": chosen_set,
-                "format": image_format or layer.default_format,
+                "format": chosen_format,
                 "zoom": zoom,
                 "latitude": coordinate.latitude,
                 "longitude": coordinate.longitude,
@@ -220,20 +223,34 @@ class OgcService:
         width: int,
         height: int,
         version: str = "1.3.0",
-        image_format: str = "image/jpeg",
+        image_format: str | None = None,
         styles: str = "",
         transparent: bool = False,
         output_dir: Path | None = None,
         stem: str | None = None,
+        validate: bool = True,
     ) -> OgcResult:
         """Download a bounding box from a WMS service.
 
         A request larger than a server will usually accept is split into a grid
         of ``GetMap`` calls and reassembled, so the caller can ask for an image
         far bigger than any single request allows.
+
+        Unless ``validate`` is disabled, the layer names and the requested
+        format are checked against the service's capabilities first. Both would
+        otherwise fail as an XML service exception carrying HTTP 200.
         """
         if width <= 0 or height <= 0:
             raise ValidationError("WMS image dimensions must be positive.")
+
+        chosen_format = normalize_image_format(image_format) if image_format else "image/png"
+        if validate:
+            capabilities = await self.wms_capabilities(service_url, version)
+            for name in (part.strip() for part in layers.split(",") if part.strip()):
+                capabilities.layer(name)
+            chosen_format = resolve_format(
+                image_format, capabilities.formats, capabilities.default_format
+            )
 
         columns = -(-width // MAX_WMS_PIXELS)
         rows = -(-height // MAX_WMS_PIXELS)
@@ -277,7 +294,7 @@ class OgcService:
                     piece_w,
                     piece_h,
                     version=version,
-                    image_format=image_format,
+                    image_format=chosen_format,
                     styles=styles,
                     transparent=transparent,
                 )
@@ -298,7 +315,7 @@ class OgcService:
 
         image = await asyncio.to_thread(compose)
 
-        suffix = _FORMAT_SUFFIX.get(image_format, "png")
+        suffix = _FORMAT_SUFFIX.get(chosen_format, "png")
         name = stem or safe_stem(f"wms_{layers}", "wms")
         return await self._write(
             image,
@@ -312,7 +329,7 @@ class OgcService:
                 "service_url": service_url,
                 "layers": layers,
                 "version": version,
-                "format": image_format,
+                "format": chosen_format,
                 "request_count": total,
             },
         )

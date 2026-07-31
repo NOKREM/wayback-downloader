@@ -364,17 +364,33 @@ service. Everything below the protocol — the Web Mercator maths, the tile
 planner, the mosaicker, the encoder — is shared.
 
 ```bash
-# What does each service publish? --list-layers works on both.
+# What does each service publish? --list-layers works on both, and reports
+# the layers, their extents and the image formats on offer.
 python main.py wmts https://example.org/wmts --list-layers
 python main.py wms  https://example.org/wms  --list-layers
 
 # WMTS, centred on a coordinate
 python main.py wmts https://example.org/wmts --layer aerial_2024 \
-  --lat 38.7992 --lon 26.9723 --zoom 18 --size 1024
+  --lat 38.7992 --lon 26.9723 --zoom 18 --size 1024 --format jpg
 
-# WMS, by bounding box. Requests too large for one GetMap are split and rejoined.
-python main.py wms https://example.org/wms --layers ortho \
-  --west 26.965 --south 38.795 --east 26.980 --north 38.805 --size 4096
+# WMS, by bounding box, several layers composited in order.
+# Requests too large for one GetMap are split and rejoined.
+python main.py wms https://example.org/wms --layers roads,labels \
+  --west 26.965 --south 38.795 --east 26.980 --north 38.805 --size 4096 --format png
+```
+
+`--format` takes `png`, `jpg`, `webp` and friends, or a full MIME type for
+server-specific ones like `image/vnd.jpeg-png`. It is checked against what the
+service advertises **before** anything is downloaded — an unsupported format
+otherwise comes back as an XML service exception carrying HTTP 200, which would
+be pasted into the mosaic as a corrupt tile. Layer names are checked the same
+way, and a non-raster choice (services commonly offer KML and HTML viewers
+alongside images) is rejected with the reason.
+
+```
+Formats offered: image/jpeg, image/png
+Error: Format 'image/bogus' is not offered here. Available: image/png, image/jpeg
+Error: Layer 'NOSUCHLAYER' is not published by this service. Available: DAF2, DRYGEO2, ...
 ```
 
 For WMTS, `--list-layers` marks the layers on a Web Mercator tile matrix set —

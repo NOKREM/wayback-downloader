@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from wayback_downloader.exceptions import EndpointDiscoveryError, ValidationError
@@ -53,6 +53,55 @@ WEB_MERCATOR_MATRIX_SETS = {
 }
 
 MAX_WMS_PIXELS = 4096
+
+# Short names accepted on the command line, so callers need not type a MIME
+# type. Anything containing a slash is passed through untouched.
+_FORMAT_ALIASES = {
+    "png": "image/png",
+    "png8": "image/png; mode=8bit",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "gif": "image/gif",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+    "svg": "image/svg+xml",
+}
+
+
+def normalize_image_format(value: str) -> str:
+    """Expand a short format name into its MIME type.
+
+    ``png`` becomes ``image/png``; anything already containing a slash is left
+    alone so unusual server-specific types still work.
+    """
+    text = value.strip()
+    if "/" in text:
+        return text
+    return _FORMAT_ALIASES.get(text.lower(), text)
+
+
+def resolve_format(requested: str | None, advertised: Sequence[str], default: str) -> str:
+    """Pick the image format to request, checking it against what is offered.
+
+    Validating here turns a server-side exception -- which arrives as XML with
+    an HTTP 200 and would otherwise surface as a corrupt tile -- into an error
+    naming the formats that would have worked.
+    """
+    if requested is None:
+        return default
+
+    wanted = normalize_image_format(requested)
+    if not advertised:
+        return wanted
+
+    for option in advertised:
+        if option.strip().lower() == wanted.lower():
+            return option
+
+    raise ValidationError(
+        f"Format {requested!r} is not offered here. Available: {', '.join(advertised)}"
+    )
 
 
 @dataclass(frozen=True)
@@ -296,6 +345,17 @@ class WmsCapabilities:
     title: str
     version: str
     layers: list[WmsLayer] = field(default_factory=list)
+    # WMS advertises GetMap formats once for the whole service, unlike WMTS
+    # which advertises them per layer.
+    formats: tuple[str, ...] = ()
+
+    @property
+    def default_format(self) -> str:
+        """Pick the most useful advertised GetMap format."""
+        for preferred in ("image/png", "image/jpeg", "image/webp"):
+            if preferred in self.formats:
+                return preferred
+        return self.formats[0] if self.formats else "image/png"
 
     def layer(self, name: str) -> WmsLayer:
         """Return a layer by name, case-insensitively."""
@@ -363,7 +423,15 @@ def parse_wms_capabilities(xml: str, service_url: str) -> WmsCapabilities:
     title = _text(_child(service, "Title")) or "WMS service"
     version = root.get("version") or "1.3.0"
 
-    capabilities = WmsCapabilities(service_url=service_url, title=title, version=version)
+    get_map = None
+    request = _descendant(root, "Request")
+    if request is not None:
+        get_map = _child(request, "GetMap")
+    formats = tuple(_text(node) for node in _children(get_map, "Format") if _text(node))
+
+    capabilities = WmsCapabilities(
+        service_url=service_url, title=title, version=version, formats=formats
+    )
 
     def walk(
         node: ET.Element, inherited_crs: tuple[str, ...], inherited_bounds: BoundingBox | None
@@ -562,10 +630,20 @@ class OgcClient:
         into the mosaic as a corrupt tile.
         """
         response = await self._http.get(url, accept="image/*,*/*", description=description)
-        content_type = response.headers.get("Content-Type", "")
-        if "xml" in content_type.lower() or response.content[:5] == b"<?xml":
+        content_type = response.headers.get("Content-Type", "").lower()
+
+        if "xml" in content_type or response.content[:5] == b"<?xml":
             snippet = response.text[:300].replace("\n", " ")
             raise EndpointDiscoveryError(f"{description} returned a service exception: {snippet}")
         if not response.content:
             raise EndpointDiscoveryError(f"{description} returned an empty body")
+
+        # Services advertise plenty of non-raster GetMap formats -- KML, HTML
+        # viewers, SVG. Requesting one succeeds at the HTTP level and then fails
+        # deep inside the image decoder, so reject it here with the reason.
+        if content_type and not content_type.startswith("image/"):
+            raise ValidationError(
+                f"{description} returned {content_type.split(';')[0]!r}, which is not a raster "
+                "image. Choose a raster format such as png or jpg."
+            )
         return response.content

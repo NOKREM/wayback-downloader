@@ -688,7 +688,14 @@ def wmts(
         Optional[str], typer.Option("--matrix-set", help="Tile matrix set to use.")
     ] = None,
     image_format: Annotated[
-        Optional[str], typer.Option("--tile-format", help="MIME type, e.g. image/png.")
+        Optional[str],
+        typer.Option(
+            "--format",
+            "--tile-format",
+            "-f",
+            help="Image format: png, jpg, webp, or a full MIME type. "
+            "Must be one the layer advertises -- see --list-layers.",
+        ),
     ] = None,
     style: Annotated[Optional[str], typer.Option("--style", help="Layer style identifier.")] = None,
     output: OutputOption = None,
@@ -719,6 +726,18 @@ def wmts(
                         "[success]*[/success]" if usable else "[muted]-[/muted]",
                     )
                 console.print(table)
+                every_format = sorted(
+                    {fmt for item in capabilities.layers.values() for fmt in item.formats}
+                )
+                console.print(
+                    f"[field]Formats offered:[/field] "
+                    f"[muted]{', '.join(every_format) or 'none advertised'}[/muted]"
+                )
+                console.print(
+                    "[muted]Pass one to --format (png, jpg and webp are accepted as "
+                    "shorthands). Formats are per layer; the Formats column shows each "
+                    "layer's own.[/muted]"
+                )
                 console.print(
                     "[muted]'*' marks layers on a Web Mercator matrix set, "
                     "which this tool can download directly.[/muted]"
@@ -770,8 +789,15 @@ def wms(
         str, typer.Option("--wms-version", help="WMS version: 1.3.0 or 1.1.1.")
     ] = "1.3.0",
     image_format: Annotated[
-        str, typer.Option("--tile-format", help="MIME type, e.g. image/png.")
-    ] = "image/jpeg",
+        Optional[str],
+        typer.Option(
+            "--format",
+            "--tile-format",
+            "-f",
+            help="Image format: png, jpg, webp, or a full MIME type. "
+            "Must be one the service advertises -- see --list-layers.",
+        ),
+    ] = None,
     styles: Annotated[str, typer.Option("--styles", help="Comma-separated style names.")] = "",
     transparent: Annotated[
         bool, typer.Option("--transparent", help="Request a transparent background.")
@@ -812,8 +838,18 @@ def wms(
                     )
                 console.print(table)
                 console.print(
+                    f"[field]Formats offered:[/field] "
+                    f"[muted]{', '.join(capabilities.formats) or 'none advertised'}[/muted]"
+                )
+                console.print(
+                    "[muted]Pass one to --format (png, jpg and webp are accepted as "
+                    "shorthands). WMS advertises formats once for the whole service, "
+                    "so every layer accepts the same set.[/muted]"
+                )
+                console.print(
                     "[muted]'*' marks layers advertising a CRS this tool can request. "
-                    "Bounds show the extent to pass to --west/--south/--east/--north.[/muted]"
+                    "Bounds show the extent to pass to --west/--south/--east/--north. "
+                    "--layers takes several, comma-separated, drawn in order.[/muted]"
                 )
                 return
 

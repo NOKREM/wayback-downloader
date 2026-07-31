@@ -12,8 +12,10 @@ from wayback_downloader.api.ogc import (
     WmsLayer,
     WmtsCapabilities,
     WmtsLayer,
+    normalize_image_format,
     parse_wms_capabilities,
     parse_wmts_capabilities,
+    resolve_format,
     wms_getmap_url,
     wmts_tile_url,
 )
@@ -299,6 +301,13 @@ WMS_130 = """<?xml version="1.0"?>
 <WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms">
   <Service><Name>WMS</Name><Title>GeoServer Web Map Service</Title></Service>
   <Capability>
+    <Request>
+      <GetMap>
+        <Format>image/png</Format>
+        <Format>image/jpeg</Format>
+        <Format>text/html; subtype=openlayers</Format>
+      </GetMap>
+    </Request>
     <Layer>
       <Title>Grouping node</Title>
       <CRS>EPSG:4326</CRS>
@@ -407,6 +416,63 @@ def test_wms_supports_wgs84_flags_usable_layers() -> None:
 
     unusable = WmsLayer("x", "x", ("EPSG:27700",), None)
     assert unusable.supports_wgs84() is False
+
+
+def test_wms_reads_service_level_getmap_formats() -> None:
+    """WMS advertises its formats once, under Request/GetMap."""
+    parsed = parse_wms_capabilities(WMS_130, SERVICE)
+    assert parsed.formats == ("image/png", "image/jpeg", "text/html; subtype=openlayers")
+    assert parsed.default_format == "image/png"
+
+
+def test_wms_without_advertised_formats_still_has_a_default() -> None:
+    """A service that advertises nothing falls back to PNG."""
+    parsed = parse_wms_capabilities(WMS_111, SERVICE)
+    assert parsed.formats == ()
+    assert parsed.default_format == "image/png"
+
+
+@pytest.mark.parametrize(
+    ("shorthand", "mime"),
+    [
+        ("png", "image/png"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("webp", "image/webp"),
+        ("tif", "image/tiff"),
+        ("PNG", "image/png"),
+    ],
+)
+def test_format_shorthands_expand(shorthand: str, mime: str) -> None:
+    """Callers can type `png` rather than `image/png`."""
+    assert normalize_image_format(shorthand) == mime
+
+
+def test_full_mime_types_pass_through() -> None:
+    """Anything with a slash is left alone, including server-specific types."""
+    assert normalize_image_format("image/png; mode=8bit") == "image/png; mode=8bit"
+    assert normalize_image_format("image/vnd.jpeg-png") == "image/vnd.jpeg-png"
+
+
+def test_resolve_format_matches_the_advertised_spelling() -> None:
+    """The value sent is the one the service published, not the shorthand."""
+    assert resolve_format("jpg", ("image/png", "image/jpeg"), "image/png") == "image/jpeg"
+    assert resolve_format(None, ("image/png", "image/jpeg"), "image/png") == "image/png"
+
+
+def test_resolve_format_rejects_what_is_not_offered() -> None:
+    """An unsupported format fails before any request, naming the options.
+
+    Left to the server this arrives as an XML exception carrying HTTP 200,
+    which would otherwise be pasted into the mosaic as a corrupt tile.
+    """
+    with pytest.raises(ValidationError, match="image/png, image/jpeg"):
+        resolve_format("image/bogus", ("image/png", "image/jpeg"), "image/png")
+
+
+def test_resolve_format_trusts_the_caller_when_nothing_is_advertised() -> None:
+    """With no advertised list there is nothing to validate against."""
+    assert resolve_format("webp", (), "image/png") == "image/webp"
 
 
 BOX = BoundingBox(west=26.965, south=38.795, east=26.980, north=38.805)
