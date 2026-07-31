@@ -76,6 +76,19 @@ _FORMAT_ALIASES = {
 }
 
 
+# Formats whose bytes this downloader can actually decode and mosaic. Services
+# routinely advertise KML, KMZ, SVG and HTML viewers from the same GetMap
+# operation; those are legitimate responses, just not rasters. SVG is excluded
+# despite its `image/` prefix because it is vector XML.
+_VECTOR_IMAGE_TYPES = {"image/svg+xml", "image/svg"}
+
+
+def is_raster_format(mime: str) -> bool:
+    """Whether a MIME type names a raster image this tool can decode."""
+    base = mime.split(";")[0].strip().lower()
+    return base.startswith("image/") and base not in _VECTOR_IMAGE_TYPES
+
+
 def normalize_image_format(value: str) -> str:
     """Expand a short format name into its MIME type.
 
@@ -94,21 +107,38 @@ def resolve_format(requested: str | None, advertised: Sequence[str], default: st
     Validating here turns a server-side exception -- which arrives as XML with
     an HTTP 200 and would otherwise surface as a corrupt tile -- into an error
     naming the formats that would have worked.
+
+    A format the service does offer but this tool cannot mosaic is rejected the
+    same way: the output pipeline decodes to a bitmap, so KML, KMZ, SVG and the
+    HTML viewers advertised alongside the images cannot produce an image.
     """
     if requested is None:
         return default
 
     wanted = normalize_image_format(requested)
-    if not advertised:
-        return wanted
+    chosen = wanted
+    if advertised:
+        for option in advertised:
+            if option.strip().lower() == wanted.lower():
+                chosen = option
+                break
+        else:
+            raise ValidationError(
+                f"Format {requested!r} is not offered here. Available: {', '.join(advertised)}"
+            )
 
-    for option in advertised:
-        if option.strip().lower() == wanted.lower():
-            return option
-
-    raise ValidationError(
-        f"Format {requested!r} is not offered here. Available: {', '.join(advertised)}"
-    )
+    if not is_raster_format(chosen):
+        rasters = [option for option in advertised if is_raster_format(option)]
+        raise ValidationError(
+            f"Format {requested!r} is not a raster image, and this tool builds raster "
+            "mosaics. "
+            + (
+                f"Raster formats offered here: {', '.join(rasters)}"
+                if rasters
+                else "This service advertises no raster formats."
+            )
+        )
+    return chosen
 
 
 @dataclass(frozen=True)
@@ -726,18 +756,28 @@ class OgcClient:
         response = await self._get(url, "image/*,*/*", description)
         content_type = response.headers.get("Content-Type", "").lower()
 
-        if "xml" in content_type or response.content[:5] == b"<?xml":
-            snippet = response.text[:300].replace("\n", " ")
-            raise EndpointDiscoveryError(f"{description} returned a service exception: {snippet}")
         if not response.content:
             raise EndpointDiscoveryError(f"{description} returned an empty body")
 
-        # Services advertise plenty of non-raster GetMap formats -- KML, HTML
-        # viewers, SVG. Requesting one succeeds at the HTTP level and then fails
-        # deep inside the image decoder, so reject it here with the reason.
-        if content_type and not content_type.startswith("image/"):
+        # Not every XML body is an error. KML is XML, and so is SVG; treating
+        # any XML as an exception reported a perfectly valid KML document as
+        # "a service exception". Look for an actual exception document.
+        head = response.content[:2048].decode("utf-8", errors="replace")
+        if any(
+            marker in head
+            for marker in ("ServiceExceptionReport", "ExceptionReport", "<ServiceException")
+        ):
+            raise ServiceRequestError(
+                f"{description} returned a service exception: {describe_service_error(response)}"
+            )
+
+        # Services advertise plenty of non-raster GetMap formats -- KML, KMZ,
+        # SVG, HTML viewers. Those return successfully and then fail inside the
+        # image decoder, so reject them here with the reason.
+        base_type = content_type.split(";")[0].strip()
+        if base_type and not is_raster_format(base_type):
             raise ValidationError(
-                f"{description} returned {content_type.split(';')[0]!r}, which is not a raster "
-                "image. Choose a raster format such as png or jpg."
+                f"{description} returned {base_type!r}, which is not a raster image. "
+                "This tool builds raster mosaics -- choose a format such as png or jpg."
             )
         return response.content

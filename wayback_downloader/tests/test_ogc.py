@@ -12,6 +12,7 @@ from wayback_downloader.api.ogc import (
     WmsLayer,
     WmtsCapabilities,
     WmtsLayer,
+    is_raster_format,
     normalize_image_format,
     parse_wms_capabilities,
     parse_wmts_capabilities,
@@ -473,6 +474,62 @@ def test_resolve_format_rejects_what_is_not_offered() -> None:
 def test_resolve_format_trusts_the_caller_when_nothing_is_advertised() -> None:
     """With no advertised list there is nothing to validate against."""
     assert resolve_format("webp", (), "image/png") == "image/webp"
+
+
+@pytest.mark.parametrize(
+    "mime",
+    [
+        "image/png",
+        "image/jpeg",
+        "image/png; mode=8bit",
+        "image/tiff",
+        "image/vnd.jpeg-png",
+        "IMAGE/PNG",
+    ],
+)
+def test_raster_formats_are_recognised(mime: str) -> None:
+    """Anything the decoder can turn into pixels counts as raster."""
+    assert is_raster_format(mime) is True
+
+
+@pytest.mark.parametrize(
+    "mime",
+    [
+        "application/vnd.google-earth.kml+xml",
+        "application/vnd.google-earth.kmz",
+        "text/html; subtype=openlayers",
+        "image/svg+xml",
+    ],
+)
+def test_non_raster_formats_are_recognised(mime: str) -> None:
+    """KML, KMZ and HTML viewers are valid GetMap outputs but not images.
+
+    SVG is excluded despite its `image/` prefix: it is vector XML, and the
+    decoder cannot rasterise it.
+    """
+    assert is_raster_format(mime) is False
+
+
+def test_advertised_but_unusable_format_is_refused_with_the_alternatives() -> None:
+    """A format the service offers but this tool cannot mosaic is rejected.
+
+    Services publish KML and HTML viewers from the same GetMap operation as
+    their images, so it is offered, valid, and still useless here.
+    """
+    advertised = (
+        "image/png",
+        "image/jpeg",
+        "application/vnd.google-earth.kml+xml",
+        "text/html; subtype=openlayers",
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        resolve_format("application/vnd.google-earth.kml+xml", advertised, "image/png")
+
+    message = str(excinfo.value)
+    assert "not a raster image" in message
+    assert "image/png, image/jpeg" in message
+    # The alternatives listed must themselves be usable.
+    assert "kml" not in message.split("Raster formats offered here:")[1]
 
 
 BOX = BoundingBox(west=26.965, south=38.795, east=26.980, north=38.805)

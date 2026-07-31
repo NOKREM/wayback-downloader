@@ -11,7 +11,13 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from wayback_downloader.api.ogc import describe_service_error, endpoint_hint, suggest_layer
+from wayback_downloader.api.ogc import (
+    OgcClient,
+    describe_service_error,
+    endpoint_hint,
+    suggest_layer,
+)
+from wayback_downloader.exceptions import ServiceRequestError, ValidationError
 
 
 def response(body: str, status: int = 400, content_type: str = "text/xml") -> httpx.Response:
@@ -69,6 +75,70 @@ def test_empty_body_reports_the_status() -> None:
 def test_malformed_xml_does_not_raise() -> None:
     """A truncated body must not turn into a second failure."""
     assert describe_service_error(response("<?xml version='1.0'?><broken")) != ""
+
+
+class _StubHttp:
+    """An HTTP transport returning one canned response."""
+
+    def __init__(self, body: str | bytes, content_type: str) -> None:
+        """Seed the response body and content type."""
+        self._body = body
+        self._content_type = content_type
+
+    async def get(self, url: str, **_kwargs: object) -> httpx.Response:
+        """Return the canned response."""
+        kwargs = {"content": self._body} if isinstance(self._body, bytes) else {"text": self._body}
+        return httpx.Response(
+            200,
+            headers={"Content-Type": self._content_type},
+            request=httpx.Request("GET", url),
+            **kwargs,
+        )
+
+
+KML_BODY = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><LookAt>'
+    "<longitude>35</longitude></LookAt></Document></kml>"
+)
+
+
+async def test_valid_kml_is_reported_as_non_raster_not_as_an_exception() -> None:
+    """A KML body is a successful response, just not an image.
+
+    KML is XML, so treating every XML body as a service exception reported a
+    perfectly valid document as a failure and quoted the KML itself as the
+    "error message".
+    """
+    client = OgcClient(_StubHttp(KML_BODY, "application/vnd.google-earth.kml+xml"))  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError) as excinfo:
+        await client.fetch_image("https://example.org/wms", "GetMap 0,0")
+
+    message = str(excinfo.value)
+    assert "not a raster image" in message
+    assert "service exception" not in message
+
+
+async def test_an_actual_exception_document_is_still_detected() -> None:
+    """The narrower check must not stop catching real exception reports."""
+    body = (
+        '<?xml version="1.0"?><ServiceExceptionReport version="1.3.0">'
+        "<ServiceException>Layer nope does not exist</ServiceException>"
+        "</ServiceExceptionReport>"
+    )
+    client = OgcClient(_StubHttp(body, "text/xml"))  # type: ignore[arg-type]
+
+    with pytest.raises(ServiceRequestError, match="Layer nope does not exist"):
+        await client.fetch_image("https://example.org/wms", "GetMap 0,0")
+
+
+async def test_a_real_image_passes_through() -> None:
+    """The guards must not reject an ordinary image response."""
+    png = bytes.fromhex("89504e470d0a1a0a") + b"rest of the file"
+    client = OgcClient(_StubHttp(png, "image/png"))  # type: ignore[arg-type]
+
+    assert await client.fetch_image("https://example.org/wms", "GetMap 0,0") == png
 
 
 def test_geowebcache_wms_endpoint_gets_a_hint() -> None:
