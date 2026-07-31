@@ -393,6 +393,29 @@ Error: Format 'image/bogus' is not offered here. Available: image/png, image/jpe
 Error: Layer 'NOSUCHLAYER' is not published by this service. Available: DAF2, DRYGEO2, ...
 ```
 
+When a service does reject a request, its own explanation is reported rather
+than a bare status code — OGC servers say exactly what was wrong, and throwing
+that away makes a failure impossible to diagnose without replaying it by hand:
+
+```
+Error: GetMap 0,0 failed: HTTP 400 -- 400: No SRS specified
+That endpoint is GeoWebCache's tile-aligned WMS-C interface, which only serves
+256x256 requests on grid-aligned bounding boxes. For arbitrary extents use the
+plain WMS endpoint (usually /geoserver/<workspace>/wms), or fetch the tiles
+with the `wmts` command against /gwc/service/wmts.
+```
+
+Two endpoint traps this covers:
+
+* **`/gwc/service/wms` is not a general WMS.** It is GeoWebCache's WMS-C
+  interface and serves only grid-aligned 256x256 requests, speaking WMS 1.1.1
+  only. Use `/geoserver/<workspace>/wms` for arbitrary extents, or point the
+  `wmts` command at `/gwc/service/wmts`.
+* **Workspace-scoped endpoints drop the prefix.** `/geoserver/mta/wms`
+  publishes `DRYGEO2` where the global endpoint and the tile cache publish
+  `mta:DRYGEO2`, so a name copied from one fails against the other. The error
+  suggests the match.
+
 For WMTS, `--list-layers` marks the layers on a Web Mercator tile matrix set —
 those are the ones this tool can address directly; a layer in another
 projection is reported rather than silently mis-tiled. For WMS it also prints

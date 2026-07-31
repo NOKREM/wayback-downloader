@@ -48,6 +48,18 @@ class RateLimitError(WaybackError):
     exit_code = 6
 
 
+class ServiceRequestError(WaybackError):
+    """A remote service rejected a request and explained why.
+
+    Carries the server's own message rather than a bare status code, because
+    OGC services report the actual problem in the response body -- an unknown
+    tile matrix, a mismatched grid size -- and a status code alone is not
+    actionable.
+    """
+
+    exit_code = 8
+
+
 class ExportError(WaybackError):
     """An output format could not be written, usually a missing optional dependency."""
 

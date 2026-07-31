@@ -18,12 +18,19 @@ Two protocols, two very different shapes:
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from wayback_downloader.exceptions import EndpointDiscoveryError, ValidationError
+import httpx
+
+from wayback_downloader.exceptions import (
+    EndpointDiscoveryError,
+    ServiceRequestError,
+    ValidationError,
+)
 from wayback_downloader.models import BoundingBox, TileIndex
 from wayback_downloader.utils.http import AsyncHttpClient
 from wayback_downloader.utils.logger import get_logger
@@ -212,16 +219,32 @@ class WmtsCapabilities:
         if identifier.lower() in lowered:
             return self.layers[lowered[identifier.lower()]]
 
+        names = sorted(self.layers)
+        available = ", ".join(names[:12]) + (" ..." if len(names) > 12 else "")
         raise ValidationError(
-            f"Layer {identifier!r} is not published by this service. "
-            f"Available: {', '.join(sorted(self.layers)[:12])}"
-            + (" ..." if len(self.layers) > 12 else "")
+            f"Layer {identifier!r} is not published by this service."
+            f"{suggest_layer(identifier, names)} Available: {available}"
         )
 
 
 def _local(tag: str) -> str:
     """Return an element tag without its namespace."""
     return tag.rsplit("}", 1)[-1]
+
+
+def suggest_layer(wanted: str, available: Sequence[str]) -> str:
+    """Suggest a near match for a layer name, chiefly across workspace prefixes.
+
+    A workspace-scoped GeoServer endpoint publishes ``DRYGEO2`` while the
+    global one and the tile cache publish the same layer as ``mta:DRYGEO2``, so
+    a name copied from one fails against the other. The bare names match, which
+    is enough to point at the right one.
+    """
+    bare = wanted.rsplit(":", 1)[-1].lower()
+    for name in available:
+        if name.rsplit(":", 1)[-1].lower() == bare and name.lower() != wanted.lower():
+            return f" Did you mean {name!r}?"
+    return ""
 
 
 def _text(element: ET.Element | None) -> str:
@@ -366,10 +389,11 @@ class WmsCapabilities:
         for item in self.layers:
             if item.name.lower() == lowered:
                 return item
-        available = ", ".join(item.name for item in self.layers[:12])
+        names = [item.name for item in self.layers]
+        available = ", ".join(names[:12]) + (" ..." if len(names) > 12 else "")
         raise ValidationError(
-            f"Layer {name!r} is not published by this service. Available: {available}"
-            + (" ..." if len(self.layers) > 12 else "")
+            f"Layer {name!r} is not published by this service."
+            f"{suggest_layer(name, names)} Available: {available}"
         )
 
 
@@ -585,12 +609,86 @@ def wms_getmap_url(
     return _with_query(service_url, params)
 
 
+def describe_service_error(response: "httpx.Response") -> str:
+    """Extract the explanation an OGC server puts in a failed response body.
+
+    Servers are consistently helpful here and the information is consistently
+    thrown away: a bare status code says nothing, while the body carries
+    ``Unknown TILEMATRIX 16`` or ``tile dimensions 1024x1024 do not match those
+    of the grid set (256x256)``. Three encodings are seen in the wild -- OGC's
+    XML exception report, GeoWebCache's HTML error page, and plain text.
+    """
+    body = response.text.strip()
+    if not body:
+        return f"HTTP {response.status_code} with an empty body"
+
+    if body.startswith("<?xml") or "<ServiceException" in body or "<ExceptionReport" in body:
+        try:
+            root = ET.fromstring(body)
+        except ET.ParseError:
+            pass
+        else:
+            # The attributes live on the containing element, while the message
+            # may be either its own text (WMS `ServiceException`) or a child
+            # (OWS `Exception` wrapping an `ExceptionText`).
+            for name in ("Exception", "ServiceException"):
+                node = _descendant(root, name)
+                if node is None:
+                    continue
+                text = (
+                    _text(_child(node, "ExceptionText"))
+                    or (node.text or "").strip()
+                    or node.get("exceptionCode")
+                    or node.get("code")
+                    or ""
+                )
+                locator = node.get("locator") or ""
+                if text:
+                    return f"{text} ({locator})" if locator else text
+
+    # GeoWebCache renders its errors as an HTML page with the reason in an <h4>.
+    heading = re.search(r"<h[1-6][^>]*>(.*?)</h[1-6]>", body, re.S | re.I)
+    if heading:
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", heading.group(1))).strip()
+
+    plain = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)).strip()
+    return plain[:300] or f"HTTP {response.status_code}"
+
+
+def endpoint_hint(url: str) -> str:
+    """Return advice for endpoints that are commonly mistaken for a plain WMS.
+
+    ``/gwc/service/wms`` is GeoWebCache's WMS-C interface, not a general WMS.
+    It serves only requests matching its cached grid exactly -- 256x256 pixels
+    on an aligned bounding box -- and speaks WMS 1.1.1 only. People reach it by
+    copying the WMS link from a GeoServer tile-caching page.
+    """
+    if "/gwc/service/wms" in url.lower():
+        return (
+            "\nThat endpoint is GeoWebCache's tile-aligned WMS-C interface, which only "
+            "serves 256x256 requests on grid-aligned bounding boxes. For arbitrary "
+            "extents use the plain WMS endpoint (usually /geoserver/<workspace>/wms), "
+            "or fetch the tiles with the `wmts` command against /gwc/service/wmts."
+        )
+    return ""
+
+
 class OgcClient:
     """Fetches capabilities and imagery from arbitrary WMS/WMTS services."""
 
     def __init__(self, http: AsyncHttpClient) -> None:
         """Wire the client to the shared HTTP transport."""
         self._http = http
+
+    async def _get(self, url: str, accept: str, description: str) -> "httpx.Response":
+        """GET a URL, converting an HTTP error into the server's own reason."""
+        try:
+            return await self._http.get(url, accept=accept, description=description)
+        except httpx.HTTPStatusError as exc:
+            raise ServiceRequestError(
+                f"{description} failed: HTTP {exc.response.status_code} -- "
+                f"{describe_service_error(exc.response)}{endpoint_hint(url)}"
+            ) from exc
 
     async def wmts_capabilities(self, service_url: str) -> WmtsCapabilities:
         """Fetch and parse a WMTS capabilities document.
@@ -604,9 +702,7 @@ class OgcClient:
                 url, {"SERVICE": "WMTS", "REQUEST": "GetCapabilities", "VERSION": "1.0.0"}
             )
 
-        response = await self._http.get(
-            url, accept="text/xml,application/xml,*/*", description="WMTS capabilities"
-        )
+        response = await self._get(url, "text/xml,application/xml,*/*", "WMTS capabilities")
         return parse_wmts_capabilities(response.text, service_url)
 
     async def wms_capabilities(self, service_url: str, version: str = "1.3.0") -> WmsCapabilities:
@@ -617,9 +713,7 @@ class OgcClient:
                 url, {"SERVICE": "WMS", "REQUEST": "GetCapabilities", "VERSION": version}
             )
 
-        response = await self._http.get(
-            url, accept="text/xml,application/xml,*/*", description="WMS capabilities"
-        )
+        response = await self._get(url, "text/xml,application/xml,*/*", "WMS capabilities")
         return parse_wms_capabilities(response.text, service_url)
 
     async def fetch_image(self, url: str, description: str) -> bytes:
@@ -629,7 +723,7 @@ class OgcClient:
         is not actually an image has to be caught here or it would be pasted
         into the mosaic as a corrupt tile.
         """
-        response = await self._http.get(url, accept="image/*,*/*", description=description)
+        response = await self._get(url, "image/*,*/*", description)
         content_type = response.headers.get("Content-Type", "").lower()
 
         if "xml" in content_type or response.content[:5] == b"<?xml":
