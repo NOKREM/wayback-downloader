@@ -13,6 +13,7 @@ import pytest
 
 from wayback_downloader.api.ogc import (
     OgcClient,
+    condense_exception_text,
     describe_service_error,
     endpoint_hint,
     suggest_layer,
@@ -39,6 +40,45 @@ def test_reads_an_ows_exception_report() -> None:
       </Exception>
     </ExceptionReport>"""
     assert describe_service_error(response(body)) == "Unknown TILEMATRIX 16 (TILEMATRIX)"
+
+
+def test_a_nested_java_exception_is_condensed_to_its_point() -> None:
+    """The reason is one sentence buried in three repetitions of a stack chain.
+
+    Verbatim from a GeoServer layer whose style filters on a column the table
+    does not have. Everything that matters is the database's own complaint and
+    the hint that follows it.
+    """
+    body = """<?xml version="1.0"?>
+    <ServiceExceptionReport version="1.3.0"><ServiceException>
+javax.xml.transform.TransformerException: javax.xml.transform.TransformerException: java.lang.RuntimeException
+javax.xml.transform.TransformerException: java.lang.RuntimeException
+java.lang.RuntimeExceptionorg.postgresql.util.PSQLException: ERROR: column "faytipi" does not exist
+  Hint: Perhaps you meant to reference the column "dirifay26.fay_tipi".
+  Position: 13
+ERROR: column "faytipi" does not exist
+  Hint: Perhaps you meant to reference the column "dirifay26.fay_tipi".
+  Position: 13
+    </ServiceException></ServiceExceptionReport>"""
+
+    described = describe_service_error(response(body))
+
+    assert 'column "faytipi" does not exist' in described
+    assert "dirifay26.fay_tipi" in described
+    assert "TransformerException" not in described
+    assert "java.lang" not in described
+    # The same two lines arrive twice; they are worth saying once.
+    assert described.count("does not exist") == 1
+
+
+def test_condensing_leaves_an_ordinary_message_alone() -> None:
+    """A message with no Java frames passes through unchanged."""
+    assert condense_exception_text("Unknown TILEMATRIX 16") == "Unknown TILEMATRIX 16"
+
+
+def test_condensing_survives_a_body_that_is_only_frames() -> None:
+    """Stripping everything must not leave an empty explanation."""
+    assert condense_exception_text("java.lang.RuntimeException") != ""
 
 
 def test_reads_a_wms_service_exception() -> None:

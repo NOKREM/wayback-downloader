@@ -289,7 +289,9 @@ def _report_batch(done: list[tuple[str, Any]], failed: list[tuple[str, str]], ta
     table.add_column("Layer", style="cyan")
     table.add_column("Reason", style="dim")
     for name, reason in failed:
-        table.add_row(name, reason[:110])
+        # Generous, because the useful half of a service error is often the
+        # hint at the end -- "Perhaps you meant to reference the column ...".
+        table.add_row(name, reason[:240])
     console.print(table)
 
 

@@ -691,6 +691,33 @@ def wms_getmap_url(
     return _with_query(service_url, params)
 
 
+# A Java exception chain: a dotted package path ending in an Exception or Error
+# class, optionally followed by a colon. GeoServer nests several of these before
+# the sentence that actually says what went wrong.
+_JAVA_EXCEPTION = re.compile(r"(?:[a-z][\w$]*\.)+[A-Z][\w$]*(?:Exception|Error)\s*:?\s*")
+
+
+def condense_exception_text(text: str) -> str:
+    """Reduce a nested exception report to the part that says something.
+
+    A failing GeoServer style produces three repetitions of the same
+    TransformerException chain wrapped around one useful sentence -- "column
+    "faytipi" does not exist" and the database's hint about what was meant.
+    Java frames are stripped, blank and duplicate lines dropped, and the first
+    few remaining lines kept.
+    """
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = _JAVA_EXCEPTION.sub("", raw).strip()
+        if not line or line in lines:
+            continue
+        lines.append(line)
+
+    if not lines:
+        return re.sub(r"\s+", " ", text).strip()[:300]
+    return " ".join(lines[:3])[:400]
+
+
 def describe_service_error(response: "httpx.Response") -> str:
     """Extract the explanation an OGC server puts in a failed response body.
 
@@ -726,6 +753,7 @@ def describe_service_error(response: "httpx.Response") -> str:
                 )
                 locator = node.get("locator") or ""
                 if text:
+                    text = condense_exception_text(text)
                     return f"{text} ({locator})" if locator else text
 
     # GeoWebCache renders its errors as an HTML page with the reason in an <h4>.
