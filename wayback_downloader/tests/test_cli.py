@@ -22,7 +22,8 @@ from wayback_downloader.cli import app
 runner = CliRunner()
 
 LOCATION_COMMANDS = ("download", "versions", "range", "all", "timelapse", "bbox", "batch")
-ALL_COMMANDS = LOCATION_COMMANDS + ("endpoints", "cache")
+OGC_COMMANDS = ("wms", "wmts", "wfs", "kml")
+ALL_COMMANDS = LOCATION_COMMANDS + OGC_COMMANDS + ("endpoints", "cache")
 
 
 def plain(text: str) -> str:
@@ -107,6 +108,24 @@ def test_download_exposes_its_documented_options() -> None:
         "--geotiff",
     ):
         assert flag in options, flag
+
+
+def test_sld_is_offered_by_both_styling_commands() -> None:
+    """The stylesheet is fetchable from whichever command you are already using.
+
+    `wms` and `kml` both render through the layer's SLD, so both can hand it
+    back; `wfs` and `wmts` have no styling to speak of.
+    """
+    for command in ("wms", "kml"):
+        assert "--sld" in command_options(command), command
+    for command in ("wfs", "wmts"):
+        assert "--sld" not in command_options(command), command
+
+
+def test_all_layers_is_offered_by_every_layer_command() -> None:
+    """Whole-service downloads work wherever layers are the unit."""
+    for command in ("wms", "wmts", "wfs", "kml"):
+        assert "--all-layers" in command_options(command), command
 
 
 def test_invalid_coordinate_exits_with_the_validation_code() -> None:

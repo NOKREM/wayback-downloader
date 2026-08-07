@@ -627,12 +627,17 @@ Verified on that server: 100 of 100 placemarks carry both a `LineStyle` and an
 `ExtendedData` block, and every promoted value equals what its own balloon says.
 `<Null>` becomes an empty value, and the human-readable balloon is left in place.
 
-**The stylesheet itself** comes from `--sld`, which issues the WMS `GetStyles`
-operation and writes the SLD alongside the image:
+**The stylesheet itself** comes from `--sld`, on both `wms` and `kml`, which
+issues the WMS `GetStyles` operation and writes the SLD alongside the output:
 
 ```bash
 python main.py wms https://example.org/geoserver/mta/wms --layers DRYGEO2 --sld
+python main.py kml https://example.org/geoserver/mta/wms --layer DRYGEO2 --sld \
+  --west 26 --south 38 --east 27 --north 39
 ```
+
+It combines with `--all-layers` to pull every layer's stylesheet in one run. A
+layer whose style cannot be fetched is reported and the download continues.
 
 That is the style definition rather than a rendering of it — 10 rules, 8
 filters, stroke colours and widths on the MTA fault layer — which is what you

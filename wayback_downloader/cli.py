@@ -1255,6 +1255,13 @@ def kml(
     cql_filter: Annotated[
         Optional[str], typer.Option("--filter", help="CQL filter applied to the features.")
     ] = None,
+    sld: Annotated[
+        bool,
+        typer.Option(
+            "--sld",
+            help="Also save the layer's SLD stylesheet, via the WMS GetStyles operation.",
+        ),
+    ] = False,
     output: OutputOption = None,
 ) -> None:
     """Build a KML with both the layer's styling and its attributes.
@@ -1275,6 +1282,13 @@ def kml(
 
             async def fetch(name: str) -> tuple[OgcResult, Any]:
                 """Build one layer's merged KML."""
+                if sld:
+                    try:
+                        path = await service.download_sld(service_url, name, output_dir=output)
+                        console.print(f"  [success]style:[/success] {path.name}")
+                    except WaybackError as exc:
+                        error_console.print(f"  [warn]no stylesheet:[/warn] {exc}")
+
                 box, derived, _ = await _resolve_bbox(
                     service, service_url, name, (west, south, east, north), "1.3.0", capabilities
                 )
