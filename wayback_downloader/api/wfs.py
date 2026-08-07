@@ -156,6 +156,33 @@ def output_extension(output_format: str) -> str:
     return "dat"
 
 
+# Formats whose whole point is to be opened and looked at, where the absence of
+# styling is a surprise rather than a detail.
+_PRESENTATION_FORMATS = ("kml", "kmz", "google-earth")
+
+
+def styling_note(output_format: str) -> str:
+    """Warn that WFS output carries no styling, when the format implies looking at it.
+
+    WFS serves features, not cartography: the response has geometry and
+    attributes but no ``<Style>`` at all. Styling lives in the layer's SLD,
+    which only WMS applies. Measured on the same layer and extent: the WFS KML
+    had 20 placemarks with 20 ``ExtendedData`` blocks and zero style elements,
+    while the WMS KML had 103 placemarks with 103 ``LineStyle`` elements in
+    four colours and no attributes -- so the two are a genuine trade-off, not a
+    ranking.
+    """
+    lowered = output_format.lower()
+    if not any(marker in lowered for marker in _PRESENTATION_FORMATS):
+        return ""
+    return (
+        "WFS output carries no styling -- it has the features and their "
+        "attributes, but the colours and line widths live in the layer's SLD, "
+        "which only WMS applies. For a styled KML use: wms <url> --layers "
+        "<layer> --format kml (that route omits the attributes instead)."
+    )
+
+
 def short_crs(identifier: str) -> str:
     """Reduce a CRS identifier to its familiar short form.
 

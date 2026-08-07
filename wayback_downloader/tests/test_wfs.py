@@ -14,6 +14,7 @@ from wayback_downloader.api.wfs import (
     parse_wfs_capabilities,
     resolve_output_format,
     short_crs,
+    styling_note,
     summarize_features,
     wfs_getfeature_url,
 )
@@ -241,6 +242,29 @@ def test_extension_matches_the_output_format(output_format: str, extension: str)
 def test_crs_identifiers_are_shortened(identifier: str, expected: str) -> None:
     """Services name the same system three ways; only the code is useful."""
     assert short_crs(identifier) == expected
+
+
+@pytest.mark.parametrize(
+    "output_format",
+    ["KML", "application/vnd.google-earth.kml+xml", "application/vnd.google-earth.kmz"],
+)
+def test_presentation_formats_warn_about_missing_styling(output_format: str) -> None:
+    """KML from WFS has no styles, which surprises people who open it.
+
+    Measured on one layer and extent: the WFS KML had 20 placemarks and zero
+    style elements; the WMS KML of the same thing had 103 LineStyle elements in
+    four colours. The note names the WMS route and its cost.
+    """
+    note = styling_note(output_format)
+    assert "no styling" in note
+    assert "wms" in note
+    assert "attributes" in note
+
+
+@pytest.mark.parametrize("output_format", ["application/json", "csv", "shape-zip", "GML2"])
+def test_data_formats_get_no_styling_note(output_format: str) -> None:
+    """Nobody expects a shapefile or CSV to carry cartography."""
+    assert styling_note(output_format) == ""
 
 
 def test_geojson_is_summarised() -> None:

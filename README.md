@@ -511,6 +511,21 @@ types, attribute names, and how many the server matched before the limit
 applied. GML, CSV and shapefile archives are written through unparsed rather
 than guessed at.
 
+> **KML from WFS has no styling, and that is not a bug.** WFS serves features;
+> the colours and line widths live in the layer's SLD, which only WMS applies.
+> Measured on one layer and extent:
+>
+> | | `wfs --format kml` | `wms --format kml` |
+> |---|---|---|
+> | `<Style>` / `<LineStyle>` | 0 | 103 |
+> | `<color>` | 0 | 309, in 4 colours |
+> | `<ExtendedData>` (attributes) | 20 | 0 |
+>
+> So it is a trade-off rather than a ranking: WFS gives you the attributes,
+> WMS gives you the cartography. Requesting KML or KMZ from `wfs` prints a note
+> saying so. GeoServer's `kmattr` vendor parameter does not bridge the gap —
+> tested, and it changed nothing.
+
 ### Cache and diagnostics
 
 ```bash

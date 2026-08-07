@@ -39,6 +39,7 @@ from wayback_downloader.api.wfs import (
     output_extension,
     parse_wfs_capabilities,
     resolve_output_format,
+    styling_note,
     summarize_features,
     wfs_getfeature_url,
 )
@@ -186,6 +187,8 @@ class OgcService:
             task.advance(1)
 
         resolved_format = chosen_format or "application/json"
+        if note := styling_note(resolved_format):
+            logger.warning("%s", note)
         summary = summarize_features(payload, resolved_format)
         name = stem or safe_stem(f"wfs_{type_name}", "wfs")
         target = output_dir or self.settings.output_dir
