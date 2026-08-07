@@ -9,7 +9,11 @@ import pytest
 
 from wayback_downloader.api.ogc import sibling_service_url
 from wayback_downloader.exceptions import ExportError
-from wayback_downloader.export.kml import KML_NAMESPACE, merge_attributes
+from wayback_downloader.export.kml import (
+    KML_NAMESPACE,
+    attributes_from_descriptions,
+    merge_attributes,
+)
 
 NS = f"{{{KML_NAMESPACE}}}"
 
@@ -256,6 +260,68 @@ def test_features_at_identical_coordinates_are_left_unmatched() -> None:
     assert report.matched == 1
     assert attributes(placemarks(merged)[0]) == {}
     assert attributes(placemarks(merged)[1]) == {"which": "c"}
+
+
+BALLOON_KML = f"""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="{KML_NAMESPACE}"><Document>
+  <Placemark id="DRYGEO2.fid-31725dee_585c">
+    <description>&lt;h4&gt;DRYGEO2&lt;/h4&gt;
+&lt;ul class="textattributes"&gt;
+  &lt;li&gt;&lt;strong&gt;&lt;span class="atr-name"&gt;FAY_ADI&lt;/span&gt;:&lt;/strong&gt;
+  &lt;span class="atr-value"&gt;ÇEŞME FAYI&lt;/span&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;&lt;span class="atr-name"&gt;SEGMENT_ADI&lt;/span&gt;:&lt;/strong&gt;
+  &lt;span class="atr-value"&gt;&lt;Null&gt;&lt;/span&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;&lt;span class="atr-name"&gt;faytipi&lt;/span&gt;:&lt;/strong&gt;
+  &lt;span class="atr-value"&gt;4&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;</description>
+    <Style><LineStyle><color>4c999999</color><width>3</width></LineStyle></Style>
+    <LineString><coordinates>26.9,39.0 27.0,39.1</coordinates></LineString>
+  </Placemark>
+</Document></kml>
+""".encode()
+
+
+def test_attributes_are_recovered_from_the_description_balloon() -> None:
+    """A server with WFS switched off still yields structured attributes.
+
+    MTA's GeoServer answers a WFS capabilities request with ServiceUnavailable,
+    so there is no second response to join against -- but WMS has already
+    rendered the attributes into an HTML balloon, and they can be promoted from
+    there without another request.
+    """
+    merged, report = attributes_from_descriptions(BALLOON_KML)
+
+    assert report.strategy == "description"
+    assert report.matched == 1
+    assert report.complete is True
+
+    assert attributes(placemarks(merged)[0]) == {
+        "FAY_ADI": "ÇEŞME FAYI",
+        "SEGMENT_ADI": None,  # <Null> becomes an empty value
+        "faytipi": "4",
+    }
+
+
+def test_promoting_the_balloon_leaves_the_styling_alone() -> None:
+    """Promotion must not disturb what made the KML render."""
+    merged, _ = attributes_from_descriptions(BALLOON_KML)
+    text = merged.decode()
+
+    assert text.count("<LineStyle") == 1
+    assert "4c999999" in text
+    assert "26.9,39.0 27.0,39.1" in text
+
+
+def test_the_description_itself_is_kept() -> None:
+    """The human-readable balloon still works in a viewer afterwards."""
+    merged, _ = attributes_from_descriptions(BALLOON_KML)
+    assert b"textattributes" in merged
+
+
+def test_a_kml_without_balloons_says_so() -> None:
+    """A service that renders no attributes gets a specific message."""
+    with pytest.raises(ExportError, match="carries an attribute balloon"):
+        attributes_from_descriptions(STYLED_KML)
 
 
 def test_nothing_matching_either_way_explains_both_attempts() -> None:

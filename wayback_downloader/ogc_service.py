@@ -33,7 +33,11 @@ from wayback_downloader.api.ogc import (
     wms_getmap_url,
     wmts_tile_url,
 )
-from wayback_downloader.export.kml import MergeReport, merge_attributes
+from wayback_downloader.export.kml import (
+    MergeReport,
+    attributes_from_descriptions,
+    merge_attributes,
+)
 from wayback_downloader.api.ogc import _with_query
 from wayback_downloader.api.wfs import (
     WfsCapabilities,
@@ -235,6 +239,39 @@ class OgcService:
             },
         )
 
+    async def download_sld(
+        self,
+        service_url: str,
+        layers: str,
+        output_dir: Path | None = None,
+        stem: str | None = None,
+    ) -> Path:
+        """Fetch the SLD stylesheet a WMS applies to a layer.
+
+        ``GetStyles`` is a WMS 1.1.1 operation, so it is requested at that
+        version regardless of what the rest of the session uses. It returns the
+        style itself rather than a rendering of it -- the rules, filters,
+        colours and widths -- which is what you need to reproduce the
+        cartography somewhere else, or to see why a layer draws as it does.
+        """
+        url = _with_query(
+            service_url,
+            {
+                "SERVICE": "WMS",
+                "VERSION": "1.1.1",
+                "REQUEST": "GetStyles",
+                "LAYERS": layers,
+            },
+        )
+        payload = await self.client.fetch_image(url, "GetStyles", expect_raster=False)
+
+        target = output_dir or self.settings.output_dir
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / f"{stem or safe_stem(f'style_{layers}', 'style')}.sld"
+        path.write_bytes(payload)
+        logger.info("Wrote %s (%d bytes)", path.name, len(payload))
+        return path
+
     async def download_styled_kml(
         self,
         service_url: str,
@@ -290,10 +327,27 @@ class OgcService:
         )
 
         with self.progress.task("Styled KML", total=2) as task:
-            styled, features = await asyncio.gather(styled_request, features_request)
+            # The feature half is allowed to fail: a server may publish no WFS
+            # at all, and the attributes are still recoverable from the styled
+            # KML's own description balloons.
+            styled, features = await asyncio.gather(
+                styled_request, features_request, return_exceptions=True
+            )
             task.advance(2)
 
-        merged, report = await asyncio.to_thread(merge_attributes, styled, features)
+        if isinstance(styled, BaseException):
+            raise styled
+        assert isinstance(styled, bytes)
+
+        if isinstance(features, BaseException):
+            logger.warning(
+                "The feature query failed (%s); taking the attributes from the "
+                "styled KML's own description balloons instead",
+                features,
+            )
+            merged, report = await asyncio.to_thread(attributes_from_descriptions, styled)
+        else:
+            merged, report = await asyncio.to_thread(merge_attributes, styled, features)
         logger.info("Merged styled KML: %s", report.summary())
 
         name = stem or safe_stem(f"kml_{layer}", "kml")
@@ -315,6 +369,7 @@ class OgcService:
                 "format": "application/vnd.google-earth.kml+xml",
                 "rasterised": False,
                 "styled": True,
+                "attribute_source": report.strategy,
                 "placemarks": report.placemarks,
                 "features_matched": report.matched,
                 "unmatched_placemarks": report.unmatched_placemarks,

@@ -610,6 +610,35 @@ attributes, which makes the join self-checking: for every one of the 1670, the
 attached values equalled the placemark's own coordinates exactly — matching the
 right feature, not merely matching something.
 
+**No WFS on the server? It still works.** MTA's GeoServer answers a WFS
+capabilities request with `ServiceUnavailable`, and styling never needed WFS in
+the first place — WMS is what applies the SLD. The attributes are not missing
+either, only unstructured: WMS already renders them into the `<description>`
+balloon. When the feature query fails, they are promoted from there instead, in
+the same request, and the run says so:
+
+```
+The feature query failed (...); taking the attributes from the styled KML's
+own description balloons instead
+Merged styled KML: 100/100 placemark(s) matched a feature by description
+```
+
+Verified on that server: 100 of 100 placemarks carry both a `LineStyle` and an
+`ExtendedData` block, and every promoted value equals what its own balloon says.
+`<Null>` becomes an empty value, and the human-readable balloon is left in place.
+
+**The stylesheet itself** comes from `--sld`, which issues the WMS `GetStyles`
+operation and writes the SLD alongside the image:
+
+```bash
+python main.py wms https://example.org/geoserver/mta/wms --layers DRYGEO2 --sld
+```
+
+That is the style definition rather than a rendering of it — 10 rules, 8
+filters, stroke colours and widths on the MTA fault layer — which is what you
+need to reproduce the cartography elsewhere or to see why a layer draws as it
+does.
+
 The WFS endpoint is derived from the WMS one by swapping the trailing path
 segment (`/geoserver/wms` → `/geoserver/wfs`); `--wfs-url` overrides that when
 the services live elsewhere. Re-merging an already-merged file replaces its

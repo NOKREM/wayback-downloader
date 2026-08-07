@@ -17,8 +17,10 @@ properties.
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from html import unescape
 from typing import Any, Iterable
 
 from wayback_downloader.exceptions import ExportError
@@ -202,6 +204,94 @@ def _no_match_reason(
     )
 
 
+# GeoServer renders each placemark's attributes into an HTML balloon inside
+# <description>, as `<span class="atr-name">FAY_ADI</span> ... <span
+# class="atr-value">CESME FAYI</span>`. That is the same data WFS would return,
+# already present in the styled KML, which is what makes a merge possible on a
+# server with WFS switched off.
+_BALLOON_ATTRIBUTE = re.compile(
+    r'atr-name"?>(?P<name>.*?)</span>.*?atr-value"?>(?P<value>.*?)</span>',
+    re.DOTALL,
+)
+
+# GeoServer writes a literal <Null> for an absent value.
+_BALLOON_NULL = "<Null>"
+
+
+def _description_attributes(placemark: ET.Element) -> dict[str, str]:
+    """Read a placemark's attributes out of its own description balloon."""
+    description = next((child for child in placemark if _local(child.tag) == "description"), None)
+    if description is None or not description.text:
+        return {}
+
+    found: dict[str, str] = {}
+    for match in _BALLOON_ATTRIBUTE.finditer(description.text):
+        name = unescape(match.group("name")).strip()
+        value = unescape(match.group("value")).strip()
+        if name:
+            found[name] = "" if value == _BALLOON_NULL else value
+    return found
+
+
+def attributes_from_descriptions(styled_kml: bytes) -> tuple[bytes, MergeReport]:
+    """Turn each placemark's description balloon into machine-readable data.
+
+    Needed when the server publishes no WFS -- MTA's GeoServer answers a
+    capabilities request with ``ServiceUnavailable`` -- since there is then no
+    second response to join against. The attributes are not missing in that
+    case, only unstructured: they sit in the HTML balloon WMS already produced,
+    so they can be promoted to ``ExtendedData`` without another request.
+    """
+    ET.register_namespace("", KML_NAMESPACE)
+    try:
+        root = ET.fromstring(styled_kml)
+    except ET.ParseError as exc:
+        raise ExportError(f"The styled KML could not be parsed: {exc}") from exc
+
+    placemarks = [element for element in root.iter() if _local(element.tag) == "Placemark"]
+    if not placemarks:
+        raise ExportError("The styled KML contains no placemarks to annotate.")
+
+    matched = 0
+    attributes_added = 0
+    for placemark in placemarks:
+        found = _description_attributes(placemark)
+        if not found:
+            continue
+        _attach(placemark, found)
+        matched += 1
+        attributes_added += len(found)
+
+    if matched == 0:
+        raise ExportError(
+            "No placemark carries an attribute balloon in its description, so there "
+            "is nothing to promote. This service renders its KML without attributes."
+        )
+
+    return (
+        ET.tostring(root, encoding="utf-8", xml_declaration=True),
+        MergeReport(
+            placemarks=len(placemarks),
+            features=matched,
+            matched=matched,
+            unmatched_placemarks=len(placemarks) - matched,
+            attributes_added=attributes_added,
+            strategy="description",
+        ),
+    )
+
+
+def _attach(placemark: ET.Element, properties: dict[str, Any]) -> None:
+    """Replace a placemark's ExtendedData with the given properties."""
+    for existing in [c for c in placemark if _local(c.tag) == "ExtendedData"]:
+        placemark.remove(existing)
+
+    extended = ET.SubElement(placemark, f"{{{KML_NAMESPACE}}}ExtendedData")
+    for key, value in properties.items():
+        data = ET.SubElement(extended, f"{{{KML_NAMESPACE}}}Data", {"name": str(key)})
+        ET.SubElement(data, f"{{{KML_NAMESPACE}}}value").text = "" if value is None else str(value)
+
+
 def merge_attributes(styled_kml: bytes, geojson: bytes) -> tuple[bytes, MergeReport]:
     """Attach GeoJSON attributes to a styled KML, matched on feature id.
 
@@ -241,17 +331,9 @@ def merge_attributes(styled_kml: bytes, geojson: bytes) -> tuple[bytes, MergeRep
         if not properties:
             continue
 
-        # Replace rather than append, so re-merging a file stays idempotent.
-        for existing in [c for c in placemark if _local(c.tag) == "ExtendedData"]:
-            placemark.remove(existing)
-
-        extended = ET.SubElement(placemark, f"{{{KML_NAMESPACE}}}ExtendedData")
-        for key, value in properties.items():
-            data = ET.SubElement(extended, f"{{{KML_NAMESPACE}}}Data", {"name": str(key)})
-            ET.SubElement(data, f"{{{KML_NAMESPACE}}}value").text = (
-                "" if value is None else str(value)
-            )
-            attributes_added += 1
+        # Replaces rather than appends, so re-merging a file stays idempotent.
+        _attach(placemark, properties)
+        attributes_added += len(properties)
         matched += 1
 
     report = MergeReport(

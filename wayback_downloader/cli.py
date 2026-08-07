@@ -986,6 +986,13 @@ def wms(
     transparent: Annotated[
         bool, typer.Option("--transparent", help="Request a transparent background.")
     ] = False,
+    sld: Annotated[
+        bool,
+        typer.Option(
+            "--sld",
+            help="Also save the layer's SLD stylesheet, via the WMS GetStyles operation.",
+        ),
+    ] = False,
     output: OutputOption = None,
 ) -> None:
     """Download a bounding box from any WMS service, or list what it publishes.
@@ -1045,6 +1052,13 @@ def wms(
 
             async def fetch(name: str) -> OgcResult:
                 """Download one layer, resolving its own extent if needed."""
+                if sld:
+                    try:
+                        path = await service.download_sld(service_url, name, output_dir=output)
+                        console.print(f"  [success]style:[/success] {path.name}")
+                    except WaybackError as exc:
+                        error_console.print(f"  [warn]no stylesheet:[/warn] {exc}")
+
                 box, derived, caps = await _resolve_bbox(
                     service,
                     service_url,
