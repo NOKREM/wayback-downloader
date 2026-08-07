@@ -64,6 +64,21 @@ def test_unknown_layer_still_reports_what_exists() -> None:
         bounds_of_layers(capabilities(WIDE), "nope")
 
 
+def test_a_layer_with_no_extent_says_where_the_box_must_come_from() -> None:
+    """An unadvertised layer is often downloadable; its extent is not knowable.
+
+    This service serves 12 layers through its tile cache that its WMS
+    capabilities never mention -- they return valid images when named, but
+    nothing advertises where they are.
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        bounds_of_layers(capabilities(UNBOUNDED), "unbounded")
+
+    message = str(excinfo.value)
+    assert "--west/--south/--east/--north" in message
+    assert "does not advertise" in message
+
+
 def test_whitespace_around_layer_names_is_tolerated() -> None:
     """`--layers a, b` is the same request as `--layers a,b`."""
     box, _ = bounds_of_layers(capabilities(WIDE, NARROW), " wide , narrow ")

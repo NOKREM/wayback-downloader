@@ -785,7 +785,10 @@ def bounds_of_layers(capabilities: "WmsCapabilities", layers: str) -> tuple[Boun
     if not extents:
         raise ValidationError(
             f"The service publishes no extent for {', '.join(missing) or layers}, "
-            "so the bounding box has to be given with --west/--south/--east/--north."
+            "so the bounding box has to be given with --west/--south/--east/--north. "
+            "A layer absent from the capabilities is often still downloadable -- "
+            "this service serves several it does not advertise -- but its extent "
+            "has to come from you."
         )
 
     return (

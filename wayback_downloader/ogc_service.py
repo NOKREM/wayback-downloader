@@ -173,13 +173,18 @@ class OgcService:
 
         if validate:
             capabilities = await self.wfs_capabilities(service_url, version)
-            feature_type = capabilities.feature_type(type_name)
-            type_name = feature_type.name
             chosen_format = resolve_output_format(
                 output_format, capabilities.formats, capabilities.default_format
             )
-            if extent is None:
-                extent = feature_type.bounds
+            try:
+                feature_type = capabilities.feature_type(type_name)
+            except ValidationError as exc:
+                # As for WMS: a service may serve what it does not advertise.
+                logger.warning("%s Requesting it anyway.", exc)
+            else:
+                type_name = feature_type.name
+                if extent is None:
+                    extent = feature_type.bounds
 
         url = wfs_getfeature_url(
             service_url,
@@ -570,7 +575,16 @@ class OgcService:
             if capabilities is None:
                 capabilities = await self.wms_capabilities(service_url, version)
             for name in (part.strip() for part in layers.split(",") if part.strip()):
-                capabilities.layer(name)
+                try:
+                    capabilities.layer(name)
+                except ValidationError as exc:
+                    # Warn rather than refuse. A service can serve layers it does
+                    # not advertise: MTA's WMS lists 7 while its tile cache lists
+                    # 19, and the other 12 return perfectly good images when
+                    # asked for by name. Treating the capabilities as the last
+                    # word would block requests that work. A real typo still
+                    # fails, one round-trip later, with the server's own reason.
+                    logger.warning("%s Requesting it anyway.", exc)
             chosen_format = resolve_format(
                 image_format, capabilities.formats, capabilities.default_format
             )

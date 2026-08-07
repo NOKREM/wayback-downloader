@@ -397,10 +397,20 @@ directory named after the download.
 The requested format is also what you get: asking for TIFF used to yield a PNG,
 because everything was re-encoded on the way out.
 
-Layer names and formats are both checked against the capabilities **before**
-anything is downloaded, because an unsupported value otherwise comes back as an
-XML service exception carrying HTTP 200 — which would be pasted into the mosaic
-as a corrupt tile rather than reported:
+> **`--list-layers` shows what a service advertises, which is not always what
+> it serves.** MTA's WMS lists 7 layers where its tile cache lists 19, and the
+> other 12 return perfectly good images from the WMS when asked for by name.
+> Naming an unadvertised layer therefore warns and proceeds rather than
+> refusing; a real typo still fails, one round-trip later, with the server's own
+> reason. What cannot be worked around is the extent — an unadvertised layer has
+> none to read, so `--west/--south/--east/--north` become required for it. Check
+> `wmts --list-layers` as well as `wms --list-layers` when a layer seems to be
+> missing.
+
+Formats are checked against the capabilities **before** anything is downloaded,
+because an unsupported value otherwise comes back as an XML service exception
+carrying HTTP 200 — which would be pasted into the mosaic as a corrupt tile
+rather than reported:
 
 ```
 Formats offered: image/jpeg, image/png
