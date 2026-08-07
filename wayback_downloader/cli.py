@@ -7,7 +7,7 @@ import datetime as dt
 import functools
 import json
 from pathlib import Path
-from typing import Annotated, Any, Callable, Optional, TypeVar
+from typing import Annotated, Any, Awaitable, Callable, Optional, Sequence, TypeVar
 
 import typer
 from rich.table import Table
@@ -165,6 +165,7 @@ async def _resolve_bbox(
     layers: str,
     corners: tuple[Optional[float], ...],
     version: str = "1.3.0",
+    capabilities: Optional[WmsCapabilities] = None,
 ) -> tuple[BoundingBox, bool, Optional[WmsCapabilities]]:
     """Resolve the bounding box, falling back to the layer's advertised extent.
 
@@ -185,7 +186,8 @@ async def _resolve_bbox(
             "the extent the service advertises for the layer."
         )
 
-    capabilities = await service.wms_capabilities(service_url, version)
+    if capabilities is None:
+        capabilities = await service.wms_capabilities(service_url, version)
     box, missing = bounds_of_layers(capabilities, layers)
     if missing:
         error_console.print(
@@ -220,6 +222,75 @@ def _fit_size(size: str, bbox: BoundingBox, derived: bool) -> tuple[int, int]:
     if span_x >= span_y:
         return longest, max(1, round(longest * span_y / span_x))
     return max(1, round(longest * span_x / span_y)), longest
+
+
+AllLayersOption = Annotated[
+    bool,
+    typer.Option(
+        "--all-layers",
+        help="Download every layer the service publishes, one file each. "
+        "Cannot be combined with an explicit layer.",
+    ),
+]
+
+
+def _selected_layers(names: Sequence[str], chosen: str | None, everything: bool) -> list[str]:
+    """Decide which layers a command should act on.
+
+    Refuses to guess when both a name and --all-layers are given, since one of
+    the two was certainly a mistake.
+    """
+    if everything and chosen:
+        raise ValidationError("Give either a layer or --all-layers, not both.")
+    if everything:
+        if not names:
+            raise ImageryUnavailableError("This service publishes no layers to download.")
+        return list(names)
+    if not chosen:
+        raise ValidationError("A layer is required unless --all-layers or --list-layers is used.")
+    return [chosen]
+
+
+async def _download_each(
+    layers: Sequence[str],
+    download: Callable[[str], Awaitable[Any]],
+) -> tuple[list[tuple[str, Any]], list[tuple[str, str]]]:
+    """Download each layer in turn, keeping going when one fails.
+
+    Layers are processed sequentially rather than concurrently: a whole-service
+    download is dozens of requests against someone else's server, and the point
+    is to be unobtrusive rather than fast. One layer failing -- a broken style,
+    a layer the node does not publish -- must not lose the rest.
+    """
+    done: list[tuple[str, Any]] = []
+    failed: list[tuple[str, str]] = []
+
+    for index, name in enumerate(layers, start=1):
+        console.print(f"[muted]({index}/{len(layers)})[/muted] [info]{name}[/info]")
+        try:
+            done.append((name, await download(name)))
+        except WaybackError as exc:
+            failed.append((name, str(exc).replace("\n", " ")))
+            error_console.print(f"  [warn]skipped:[/warn] {exc}")
+
+    return done, failed
+
+
+def _report_batch(done: list[tuple[str, Any]], failed: list[tuple[str, str]], target: Path) -> None:
+    """Summarise a whole-service download."""
+    console.print(
+        f"\n[success]{len(done)} of {len(done) + len(failed)} layer(s) downloaded[/success] "
+        f"to {target}"
+    )
+    if not failed:
+        return
+
+    table = Table(title=f"{len(failed)} layer(s) skipped")
+    table.add_column("Layer", style="cyan")
+    table.add_column("Reason", style="dim")
+    for name, reason in failed:
+        table.add_row(name, reason[:110])
+    console.print(table)
 
 
 def _report_ogc(result: OgcResult, request_label: str, service: str | None = None) -> None:
@@ -787,6 +858,7 @@ def wmts(
     list_layers: Annotated[
         bool, typer.Option("--list-layers", help="List the service's layers and exit.")
     ] = False,
+    all_layers: AllLayersOption = False,
 ) -> None:
     """Download imagery from any WMTS service, or list what it publishes."""
 
@@ -802,13 +874,13 @@ def wmts(
                 table.add_column("Matrix sets", style="dim")
                 table.add_column("XYZ", justify="center")
                 for item in sorted(capabilities.layers.values(), key=lambda l: l.identifier):
-                    usable = item.web_mercator_matrix_set() is not None
+                    addressable = item.web_mercator_matrix_set() is not None
                     table.add_row(
                         item.identifier,
                         item.title[:40],
                         ", ".join(item.formats)[:28] or "-",
                         ", ".join(item.tile_matrix_sets)[:28] or "-",
-                        "[success]*[/success]" if usable else "[muted]-[/muted]",
+                        "[success]*[/success]" if addressable else "[muted]-[/muted]",
                     )
                 console.print(table)
                 every_format = sorted(
@@ -834,19 +906,49 @@ def wmts(
 
             coordinate = validate_coordinate(lat, lon)
             width, height = parse_size(size)
-            result = await service.download_wmts(
-                service_url,
-                coordinate,
-                validate_zoom(zoom),
-                width,
-                height,
-                layer_id=layer,
-                matrix_set=matrix_set,
-                image_format=image_format,
-                style=style,
-                output_dir=output,
-            )
-            _report_ogc(result, "Requests", service=capabilities.title)
+            level = validate_zoom(zoom)
+
+            # A layer on some other projection cannot be addressed with XYZ
+            # tiles, so leave it out rather than fail on it one by one.
+            usable = [
+                item.identifier
+                for item in capabilities.layers.values()
+                if matrix_set or item.web_mercator_matrix_set()
+            ]
+            if all_layers and len(usable) < len(capabilities.layers):
+                error_console.print(
+                    f"[warn]Skipping {len(capabilities.layers) - len(usable)} layer(s)[/warn] "
+                    "on a non-Web-Mercator matrix set."
+                )
+            if all_layers and layer:
+                raise ValidationError("Give either --layer or --all-layers, not both.")
+            if all_layers and not usable:
+                raise ImageryUnavailableError(
+                    "No layer here uses a Web Mercator matrix set, so none can be downloaded."
+                )
+
+            async def fetch(name: str | None) -> OgcResult:
+                """Download one layer's window."""
+                return await service.download_wmts(
+                    service_url,
+                    coordinate,
+                    level,
+                    width,
+                    height,
+                    layer_id=name,
+                    matrix_set=matrix_set,
+                    image_format=image_format,
+                    style=style,
+                    output_dir=output,
+                )
+
+            if all_layers:
+                done, failed = await _download_each(usable, fetch)
+                _report_batch(done, failed, output or service.settings.output_dir)
+                return
+
+            # `layer` may still be None: a single-layer service needs no name.
+            _report_ogc(await fetch(layer), "Requests", service=capabilities.title)
 
     _run(run())
 
@@ -865,6 +967,7 @@ def wms(
     list_layers: Annotated[
         bool, typer.Option("--list-layers", help="List the service's layers and exit.")
     ] = False,
+    all_layers: AllLayersOption = False,
     size: SizeOption = "1024",
     version: Annotated[
         str, typer.Option("--wms-version", help="WMS version: 1.3.0 or 1.1.1.")
@@ -934,27 +1037,44 @@ def wms(
                 )
                 return
 
-            if layers is None:
-                raise ValidationError("--layers is required unless --list-layers is used.")
+            published: WmsCapabilities | None = (
+                await service.wms_capabilities(service_url, version) if all_layers else None
+            )
+            names = [item.name for item in published.layers] if published else []
+            selected = _selected_layers(names, layers, all_layers)
 
-            box, derived, caps = await _resolve_bbox(
-                service, service_url, layers, (west, south, east, north), version
-            )
-            width, height = _fit_size(size, box, derived)
-            result = await service.download_wms(
-                service_url,
-                layers,
-                box,
-                width,
-                height,
-                version=version,
-                image_format=image_format,
-                styles=styles,
-                transparent=transparent,
-                output_dir=output,
-                capabilities=caps,
-            )
-            _report_ogc(result, "GetMap requests")
+            async def fetch(name: str) -> OgcResult:
+                """Download one layer, resolving its own extent if needed."""
+                box, derived, caps = await _resolve_bbox(
+                    service,
+                    service_url,
+                    name,
+                    (west, south, east, north),
+                    version,
+                    published,
+                )
+                width, height = _fit_size(size, box, derived)
+                return await service.download_wms(
+                    service_url,
+                    name,
+                    box,
+                    width,
+                    height,
+                    version=version,
+                    image_format=image_format,
+                    styles=styles,
+                    transparent=transparent,
+                    output_dir=output,
+                    capabilities=caps or published,
+                )
+
+            target = output or service.settings.output_dir
+            if not all_layers:
+                _report_ogc(await fetch(selected[0]), "GetMap requests")
+                return
+
+            done, failed = await _download_each(selected, fetch)
+            _report_batch(done, failed, target)
 
     _run(run())
 
@@ -973,6 +1093,7 @@ def wfs(
     list_layers: Annotated[
         bool, typer.Option("--list-layers", help="List the service's feature types and exit.")
     ] = False,
+    all_layers: AllLayersOption = False,
     output_format: Annotated[
         Optional[str],
         typer.Option(
@@ -1051,22 +1172,39 @@ def wfs(
                 )
                 return
 
-            if type_name is None:
-                raise ValidationError("--layer is required unless --list-layers is used.")
-
-            result = await service.download_wfs(
-                service_url,
-                type_name,
-                version=version,
-                bbox=box,
-                output_format=output_format,
-                max_features=max_features,
-                start_index=start_index,
-                cql_filter=cql_filter,
-                sort_by=sort_by,
-                property_names=properties,
-                output_dir=output,
+            names = (
+                [
+                    item.name
+                    for item in (await service.wfs_capabilities(service_url, version)).feature_types
+                ]
+                if all_layers
+                else []
             )
+            selected = _selected_layers(names, type_name, all_layers)
+
+            async def fetch(name: str) -> OgcResult:
+                """Download one feature type."""
+                return await service.download_wfs(
+                    service_url,
+                    name,
+                    version=version,
+                    bbox=box,
+                    output_format=output_format,
+                    max_features=max_features,
+                    start_index=start_index,
+                    cql_filter=cql_filter,
+                    sort_by=sort_by,
+                    property_names=properties,
+                    output_dir=output,
+                )
+
+            target = output or service.settings.output_dir
+            if all_layers:
+                done, failed = await _download_each(selected, fetch)
+                _report_batch(done, failed, target)
+                return
+
+            result = await fetch(selected[0])
             summary = json.loads(result.metadata_path.read_text(encoding="utf-8"))
             console.print(f"\n[success]Saved[/success] {result.image_path}")
             print_kv("Format", summary.get("format", "-"))
@@ -1086,7 +1224,8 @@ def wfs(
 @handle_errors
 def kml(
     service_url: Annotated[str, typer.Argument(help="WMS service endpoint URL.")],
-    layer: Annotated[str, typer.Option("--layer", "--layers", help="Layer name.")],
+    layer: Annotated[Optional[str], typer.Option("--layer", "--layers", help="Layer name.")] = None,
+    all_layers: AllLayersOption = False,
     west: Annotated[Optional[float], typer.Option("--west", help="Western longitude.")] = None,
     south: Annotated[Optional[float], typer.Option("--south", help="Southern latitude.")] = None,
     east: Annotated[Optional[float], typer.Option("--east", help="Eastern longitude.")] = None,
@@ -1116,21 +1255,36 @@ def kml(
 
     async def run() -> None:
         async with OgcService(use_cache=_STATE["cache"], progress=_progress()) as service:
-            box, derived, _ = await _resolve_bbox(
-                service, service_url, layer, (west, south, east, north)
-            )
-            width, height = _fit_size(size, box, derived)
-            result, report = await service.download_styled_kml(
-                service_url,
-                layer,
-                box,
-                width=width,
-                height=height,
-                wfs_url=wfs_url,
-                max_features=max_features,
-                cql_filter=cql_filter,
-                output_dir=output,
-            )
+            capabilities = await service.wms_capabilities(service_url) if all_layers else None
+            names = [item.name for item in capabilities.layers] if capabilities else []
+            selected = _selected_layers(names, layer, all_layers)
+
+            async def fetch(name: str) -> tuple[OgcResult, Any]:
+                """Build one layer's merged KML."""
+                box, derived, _ = await _resolve_bbox(
+                    service, service_url, name, (west, south, east, north), "1.3.0", capabilities
+                )
+                width, height = _fit_size(size, box, derived)
+                return await service.download_styled_kml(
+                    service_url,
+                    name,
+                    box,
+                    width=width,
+                    height=height,
+                    wfs_url=wfs_url,
+                    max_features=max_features,
+                    cql_filter=cql_filter,
+                    output_dir=output,
+                )
+
+            if all_layers:
+                done, failed = await _download_each(selected, fetch)
+                for name, (_, report) in done:
+                    console.print(f"  [muted]{name}: {report.summary()}[/muted]")
+                _report_batch(done, failed, output or service.settings.output_dir)
+                return
+
+            result, report = await fetch(selected[0])
             console.print(f"\n[success]Saved[/success] {result.image_path}")
             print_kv("Placemarks", report.placemarks)
             print_kv("Matched features", f"{report.matched} of {report.features} fetched")

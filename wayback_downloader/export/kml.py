@@ -94,6 +94,39 @@ def _placemark_id(placemark: ET.Element) -> str | None:
     return None
 
 
+def _no_match_reason(placemarks: list[ET.Element], properties_by_id: dict[str, Any]) -> str:
+    """Explain why nothing joined, distinguishing the causes that look alike.
+
+    The common one is not a missing identifier but an unstable one: for a layer
+    without a primary key GeoServer mints a fresh ``fid-...`` per request, so
+    the WMS and WFS responses name the same feature differently and no join is
+    possible however the two are fetched.
+    """
+    kml_ids = [identifier for placemark in placemarks if (identifier := _placemark_id(placemark))]
+    if not kml_ids:
+        return (
+            "No placemark carries an identifier, so there is nothing to match the "
+            "features against. This service does not label its placemarks."
+        )
+
+    volatile = sum(1 for identifier in kml_ids if ".fid-" in identifier)
+    if volatile and volatile == len(kml_ids):
+        return (
+            "The placemark identifiers are per-request temporary ids (fid-...), which "
+            "the service regenerates for every call, so the styled KML and the feature "
+            "query name the same features differently and cannot be joined. This "
+            "happens for layers published without a primary key. Download the two "
+            "separately instead: `wms --format kml` for the styling, `wfs` for the "
+            "attributes."
+        )
+    if not properties_by_id:
+        return "The feature response carried no identified features to match against."
+    return (
+        "No placemark could be matched to a feature by id. The two responses may "
+        "describe different layers or different extents."
+    )
+
+
 def merge_attributes(styled_kml: bytes, geojson: bytes) -> tuple[bytes, MergeReport]:
     """Attach GeoJSON attributes to a styled KML, matched on feature id.
 
@@ -142,10 +175,7 @@ def merge_attributes(styled_kml: bytes, geojson: bytes) -> tuple[bytes, MergeRep
         attributes_added=attributes_added,
     )
     if matched == 0:
-        raise ExportError(
-            "No placemark could be matched to a feature by id. The two responses "
-            "may describe different layers, or the service may not set placemark ids."
-        )
+        raise ExportError(_no_match_reason(placemarks, properties_by_id))
     if not report.complete:
         logger.warning(
             "%d placemark(s) had no matching feature and carry no attributes; "

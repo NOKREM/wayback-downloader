@@ -431,6 +431,32 @@ Two endpoint traps this covers:
   `mta:DRYGEO2`, so a name copied from one fails against the other. The error
   suggests the match.
 
+**`--all-layers` downloads the whole service**, one file per layer, on `wms`,
+`wmts`, `wfs` and `kml`:
+
+```bash
+python main.py wfs https://example.org/geoserver/wfs --all-layers --format geojson --max-features 20
+python main.py wms https://example.org/geoserver/wms --all-layers --size 500
+```
+
+Layers are fetched one at a time — a whole-service run is dozens of requests
+against someone else's server, and being unobtrusive matters more than being
+fast. One layer failing never loses the rest; the run finishes and reports what
+it skipped:
+
+```
+42 of 43 layer(s) downloaded to output\allwms
+                              1 layer(s) skipped
+┌───────────────────────┬──────────────────────────────────────────────────┐
+│ afad:DiriFayHaritasi1 │ GetMap 0,0 returned a service exception: The     │
+│                       │ requested Style can not be used with this layer.  │
+└───────────────────────┴──────────────────────────────────────────────────┘
+```
+
+Each layer resolves its own extent, so every image covers its own layer rather
+than a shared box. For WMTS, layers on a non-Web-Mercator matrix set are
+excluded up front and counted, since XYZ tiles cannot address them.
+
 **The bounding box is optional.** Omit `--west/--south/--east/--north` and the
 layer's advertised extent is used — the same figures `--list-layers` prints:
 

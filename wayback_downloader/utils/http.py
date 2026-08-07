@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from wayback_downloader.config import Settings
-from wayback_downloader.exceptions import RateLimitError
+from wayback_downloader.exceptions import NetworkError, RateLimitError
 from wayback_downloader.utils.logger import get_logger
 from wayback_downloader.utils.retry import (
     RATE_LIMIT_STATUS,
@@ -153,12 +153,23 @@ class AsyncHttpClient:
             response.raise_for_status()
             return response
 
-        return await retry_async(
-            attempt,
-            self._policy,
-            label,
-            retry_after_hint=lambda exc: getattr(exc, "retry_after", None),
-        )
+        try:
+            return await retry_async(
+                attempt,
+                self._policy,
+                label,
+                retry_after_hint=lambda exc: getattr(exc, "retry_after", None),
+            )
+        except httpx.TransportError as exc:
+            # Wrapped only once the retries are spent, so the retry loop still
+            # sees the httpx types it decides on. Without this the loop's final
+            # `raise last_error` puts a raw httpx exception past the domain
+            # boundary, where it surfaces as a traceback with no exit code and
+            # slips through every `except WaybackError`.
+            raise NetworkError(
+                f"{label} failed after {self._policy.max_retries} retries: "
+                f"{type(exc).__name__}{f' -- {exc}' if str(exc) else ''}"
+            ) from exc
 
     async def get_json(
         self,

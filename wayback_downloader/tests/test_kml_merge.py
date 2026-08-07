@@ -151,6 +151,38 @@ def test_nothing_matching_is_an_error() -> None:
         merge_attributes(STYLED_KML, geojson(("OTHER.9", {"a": 1})))
 
 
+def test_per_request_identifiers_are_named_as_the_cause() -> None:
+    """The usual reason a merge fails is an unstable id, not a missing one.
+
+    A layer published without a primary key gets a fresh ``fid-...`` from
+    GeoServer on every request, so the styled KML and the feature query label
+    the same feature differently. Reporting that as "may not set placemark ids"
+    sent the reader looking for the wrong thing.
+    """
+    volatile = STYLED_KML.replace(b"LAYER.1", b"vel_stations.fid-50c51ad1_52e8").replace(
+        b"LAYER.2", b"vel_stations.fid-50c51ad1_52e9"
+    )
+    with pytest.raises(ExportError) as excinfo:
+        merge_attributes(volatile, geojson(("vel_stations.fid-99999999_0001", {"a": 1})))
+
+    message = str(excinfo.value)
+    assert "per-request temporary ids" in message
+    assert "primary key" in message
+    assert "wfs" in message
+
+
+def test_placemarks_without_identifiers_say_so() -> None:
+    """A service that labels nothing gets its own explanation."""
+    anonymous = STYLED_KML.replace(b'<Placemark id="LAYER.1">', b"<Placemark>").replace(
+        b'<Placemark id="LAYER.2">', b"<Placemark>"
+    )
+    anonymous = anonymous.replace(b"<name>LAYER.1</name>", b"").replace(
+        b"<name>LAYER.2</name>", b""
+    )
+    with pytest.raises(ExportError, match="No placemark carries an identifier"):
+        merge_attributes(anonymous, geojson(("LAYER.1", {"a": 1})))
+
+
 def test_invalid_inputs_are_reported() -> None:
     """Malformed input on either side names which side was wrong."""
     with pytest.raises(ExportError, match="styled KML could not be parsed"):

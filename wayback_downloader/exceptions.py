@@ -64,3 +64,14 @@ class ExportError(WaybackError):
     """An output format could not be written, usually a missing optional dependency."""
 
     exit_code = 7
+
+
+class NetworkError(WaybackError):
+    """A request could not be completed after exhausting its retries.
+
+    Distinct from :class:`ServiceRequestError`: the service never answered at
+    all -- a timeout, a refused connection, a dropped TLS handshake -- so there
+    is no server-side explanation to report.
+    """
+
+    exit_code = 9
