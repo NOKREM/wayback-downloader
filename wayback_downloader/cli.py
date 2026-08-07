@@ -13,6 +13,7 @@ import typer
 from rich.table import Table
 
 from wayback_downloader import __version__
+from wayback_downloader.api.ogc import WmsCapabilities, bounds_of_layers
 from wayback_downloader.api.wayback import filter_by_date_range
 from wayback_downloader.api.wfs import SUPPORTED_VERSIONS
 from wayback_downloader.config import get_settings
@@ -22,7 +23,7 @@ from wayback_downloader.exceptions import (
     WaybackError,
 )
 from wayback_downloader.ogc_service import OgcResult, OgcService
-from wayback_downloader.models import Coordinate, DownloadRequest, TileIndex
+from wayback_downloader.models import BoundingBox, Coordinate, DownloadRequest, TileIndex
 from wayback_downloader.service import DownloadResult, WaybackService
 from wayback_downloader.utils.cache import CacheStore
 from wayback_downloader.utils.inputs import read_batch
@@ -156,6 +157,69 @@ def _report(result: DownloadResult) -> None:
     print_kv("Metadata", result.metadata_path.name)
     if result.geotiff_path:
         print_kv("GeoTIFF", result.geotiff_path.name)
+
+
+async def _resolve_bbox(
+    service: OgcService,
+    service_url: str,
+    layers: str,
+    corners: tuple[Optional[float], ...],
+    version: str = "1.3.0",
+) -> tuple[BoundingBox, bool, Optional[WmsCapabilities]]:
+    """Resolve the bounding box, falling back to the layer's advertised extent.
+
+    Returns the box, whether it came from the service (which decides whether the
+    image shape may be adjusted to match), and the capabilities if they had to
+    be fetched. Handing those back matters: this service load-balances across
+    nodes with differing layer lists, so fetching twice can produce two
+    different answers about which layers exist.
+    """
+    if all(value is not None for value in corners):
+        west, south, east, north = corners
+        assert west is not None and south is not None
+        assert east is not None and north is not None
+        return validate_bbox(west, south, east, north), False, None
+    if any(value is not None for value in corners):
+        raise ValidationError(
+            "Give all four of --west/--south/--east/--north, or none of them to use "
+            "the extent the service advertises for the layer."
+        )
+
+    capabilities = await service.wms_capabilities(service_url, version)
+    box, missing = bounds_of_layers(capabilities, layers)
+    if missing:
+        error_console.print(
+            f"[warn]No advertised extent for {', '.join(missing)};[/warn] "
+            "the box covers the other layer(s) only."
+        )
+    console.print(
+        f"[info]Extent from the service:[/info] "
+        f"{box.west:.4f} {box.south:.4f} {box.east:.4f} {box.north:.4f}"
+    )
+    return box, True, capabilities
+
+
+def _fit_size(size: str, bbox: BoundingBox, derived: bool) -> tuple[int, int]:
+    """Parse ``--size``, matching the bounding box's shape when it can.
+
+    A single number means a square, which squashes a wide extent. When the box
+    came from the service rather than the user, the second dimension is fitted
+    to its aspect ratio instead -- linearly, since a WMS renders EPSG:4326 as
+    equirectangular, so degrees map straight onto pixels.
+    """
+    width, height = parse_size(size)
+    if not derived or "x" in str(size).lower() or "×" in str(size):
+        return width, height
+
+    span_x = bbox.east - bbox.west
+    span_y = bbox.north - bbox.south
+    if span_x <= 0 or span_y <= 0:
+        return width, height
+
+    longest = max(width, height)
+    if span_x >= span_y:
+        return longest, max(1, round(longest * span_y / span_x))
+    return max(1, round(longest * span_x / span_y)), longest
 
 
 def _report_ogc(result: OgcResult, request_label: str, service: str | None = None) -> None:
@@ -870,27 +934,16 @@ def wms(
                 )
                 return
 
-            missing = [
-                flag
-                for flag, value in (
-                    ("--layers", layers),
-                    ("--west", west),
-                    ("--south", south),
-                    ("--east", east),
-                    ("--north", north),
-                )
-                if value is None
-            ]
-            if missing:
-                raise ValidationError(
-                    f"{', '.join(missing)} required unless --list-layers is used."
-                )
+            if layers is None:
+                raise ValidationError("--layers is required unless --list-layers is used.")
 
-            box = validate_bbox(west, south, east, north)  # type: ignore[arg-type]
-            width, height = parse_size(size)
+            box, derived, caps = await _resolve_bbox(
+                service, service_url, layers, (west, south, east, north), version
+            )
+            width, height = _fit_size(size, box, derived)
             result = await service.download_wms(
                 service_url,
-                layers,  # type: ignore[arg-type]
+                layers,
                 box,
                 width,
                 height,
@@ -899,6 +952,7 @@ def wms(
                 styles=styles,
                 transparent=transparent,
                 output_dir=output,
+                capabilities=caps,
             )
             _report_ogc(result, "GetMap requests")
 
@@ -1033,10 +1087,10 @@ def wfs(
 def kml(
     service_url: Annotated[str, typer.Argument(help="WMS service endpoint URL.")],
     layer: Annotated[str, typer.Option("--layer", "--layers", help="Layer name.")],
-    west: Annotated[float, typer.Option("--west", help="Western longitude.")],
-    south: Annotated[float, typer.Option("--south", help="Southern latitude.")],
-    east: Annotated[float, typer.Option("--east", help="Eastern longitude.")],
-    north: Annotated[float, typer.Option("--north", help="Northern latitude.")],
+    west: Annotated[Optional[float], typer.Option("--west", help="Western longitude.")] = None,
+    south: Annotated[Optional[float], typer.Option("--south", help="Southern latitude.")] = None,
+    east: Annotated[Optional[float], typer.Option("--east", help="Eastern longitude.")] = None,
+    north: Annotated[Optional[float], typer.Option("--north", help="Northern latitude.")] = None,
     wfs_url: Annotated[
         Optional[str],
         typer.Option("--wfs-url", help="WFS endpoint, if it is not the WMS one with /wfs."),
@@ -1055,12 +1109,17 @@ def kml(
     WMS renders the styling but leaves the attributes in a description balloon;
     WFS carries the attributes but no styling. This fetches both and splices
     them together, matching placemarks to features by id.
+
+    Omit the bounding box to cover the whole extent the service advertises for
+    the layer.
     """
-    box = validate_bbox(west, south, east, north)
-    width, height = parse_size(size)
 
     async def run() -> None:
         async with OgcService(use_cache=_STATE["cache"], progress=_progress()) as service:
+            box, derived, _ = await _resolve_bbox(
+                service, service_url, layer, (west, south, east, north)
+            )
+            width, height = _fit_size(size, box, derived)
             result, report = await service.download_styled_kml(
                 service_url,
                 layer,

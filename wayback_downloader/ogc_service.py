@@ -467,6 +467,7 @@ class OgcService:
         output_dir: Path | None = None,
         stem: str | None = None,
         validate: bool = True,
+        capabilities: WmsCapabilities | None = None,
     ) -> OgcResult:
         """Download a bounding box from a WMS service, in any offered format.
 
@@ -488,7 +489,12 @@ class OgcService:
 
         chosen_format = normalize_image_format(image_format) if image_format else "image/png"
         if validate:
-            capabilities = await self.wms_capabilities(service_url, version)
+            # Reuse the caller's capabilities when it already has them: this
+            # service load-balances across nodes whose layer lists differ, so a
+            # second fetch can disagree with the one the caller validated
+            # against and reject a layer it just accepted.
+            if capabilities is None:
+                capabilities = await self.wms_capabilities(service_url, version)
             for name in (part.strip() for part in layers.split(",") if part.strip()):
                 capabilities.layer(name)
             chosen_format = resolve_format(

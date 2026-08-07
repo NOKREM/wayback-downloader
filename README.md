@@ -431,6 +431,23 @@ Two endpoint traps this covers:
   `mta:DRYGEO2`, so a name copied from one fails against the other. The error
   suggests the match.
 
+**The bounding box is optional.** Omit `--west/--south/--east/--north` and the
+layer's advertised extent is used — the same figures `--list-layers` prints:
+
+```bash
+python main.py wms https://example.org/wms --layers afad:DFY_GEO_WGS84_2013 --size 1200
+# Extent from the service: 25.8290 35.9360 44.7390 41.8670
+# Image size              1200x376
+```
+
+Several layers give the union of their extents, so a composite request covers
+all of them. When the extent comes from the service and `--size` was a single
+number, the other dimension is fitted to the box's shape rather than forcing a
+square that would squash the map; `--size 800x600` is always taken literally,
+and so is a square size when you supplied the box yourself. A layer that
+publishes no extent says so and asks for explicit corners, and giving only some
+of the four is refused rather than half-guessed.
+
 For WMTS, `--list-layers` marks the layers on a Web Mercator tile matrix set —
 those are the ones this tool can address directly; a layer in another
 projection is reported rather than silently mis-tiled. For WMS it also prints

@@ -737,6 +737,40 @@ def describe_service_error(response: "httpx.Response") -> str:
     return plain[:300] or f"HTTP {response.status_code}"
 
 
+def bounds_of_layers(capabilities: "WmsCapabilities", layers: str) -> tuple[BoundingBox, list[str]]:
+    """Return the extent covering the named layers, and any that lacked one.
+
+    Several layers give the union of their extents, so a composite request
+    covers all of them. A layer whose capabilities carry no extent cannot be
+    guessed at, so it is named back to the caller rather than silently ignored.
+    """
+    extents: list[BoundingBox] = []
+    missing: list[str] = []
+
+    for name in (part.strip() for part in layers.split(",") if part.strip()):
+        layer = capabilities.layer(name)
+        if layer.bounds is None:
+            missing.append(layer.name)
+        else:
+            extents.append(layer.bounds)
+
+    if not extents:
+        raise ValidationError(
+            f"The service publishes no extent for {', '.join(missing) or layers}, "
+            "so the bounding box has to be given with --west/--south/--east/--north."
+        )
+
+    return (
+        BoundingBox(
+            west=min(box.west for box in extents),
+            south=min(box.south for box in extents),
+            east=max(box.east for box in extents),
+            north=max(box.north for box in extents),
+        ),
+        missing,
+    )
+
+
 def sibling_service_url(url: str, service: str) -> str:
     """Point a service URL at a different OGC service on the same server.
 
