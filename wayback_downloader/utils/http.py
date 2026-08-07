@@ -28,21 +28,48 @@ logger = get_logger(__name__)
 WAYBACK_APP_ORIGIN = "https://livingatlas.arcgis.com"
 WAYBACK_APP_REFERER = "https://livingatlas.arcgis.com/wayback/"
 
+# Hosts the Wayback web app actually talks to. The app-identifying headers below
+# are sent only to these.
+WAYBACK_APP_HOSTS = ("arcgis.com", "arcgisonline.com", "esri.com")
+
+# Sent only to the Wayback service, where they make the request match what the
+# official web app issues. Sending them everywhere is both dishonest -- they
+# announce an origin the request does not have -- and actively harmful: a WAF in
+# front of an unrelated service sees a cross-site request from a foreign origin
+# and rejects it. AFAD's GeoServer answers 200 to a plain request and 401 to the
+# same request carrying these.
+_APP_IDENTITY_HEADERS = {
+    "Origin": WAYBACK_APP_ORIGIN,
+    "Referer": WAYBACK_APP_REFERER,
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "cross-site",
+}
+
+
+def targets_wayback_app(url: str) -> bool:
+    """Whether a URL belongs to the Esri service the app headers describe."""
+    host = (httpx.URL(url).host or "").lower()
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in WAYBACK_APP_HOSTS)
+
 
 def build_headers(settings: Settings, accept: str = "*/*") -> dict[str, str]:
-    """Build the browser-equivalent header set for a Wayback request."""
+    """Build the neutral header set sent to every host."""
     return {
         "User-Agent": settings.user_agent,
         "Accept": accept,
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
-        "Origin": WAYBACK_APP_ORIGIN,
-        "Referer": WAYBACK_APP_REFERER,
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "cross-site",
         "Connection": "keep-alive",
     }
+
+
+def headers_for(settings: Settings, url: str, accept: str | None = None) -> dict[str, str]:
+    """Build the headers for one request, scoped to its target host."""
+    headers = build_headers(settings, accept or "*/*")
+    if targets_wayback_app(url):
+        headers.update(_APP_IDENTITY_HEADERS)
+    return headers
 
 
 class AsyncHttpClient:
@@ -110,7 +137,9 @@ class AsyncHttpClient:
         guessing a backoff.
         """
         label = description or url
-        headers = {"Accept": accept} if accept else None
+        # Built per request rather than once on the client: which headers are
+        # appropriate depends on the host being addressed.
+        headers = headers_for(self._settings, url, accept)
 
         async def attempt() -> httpx.Response:
             await self._limiter.acquire()
