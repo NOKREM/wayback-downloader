@@ -681,9 +681,22 @@ its own rule:
 
 KML reverses the channel order and puts alpha first; the conversion is checked
 against GeoServer's own output, where `#999999` at `stroke-opacity` 0.3 comes
-back as `4c999999`. A rule that defines nothing to draw with leaves its
-placemarks alone rather than having a colour invented for them, and
-`recolour=False` classifies without restyling.
+back as `4c999999`. A rule that defines nothing to draw with keeps the colour
+the server chose rather than having one invented for it, and `recolour=False`
+classifies without restyling.
+
+Two details that a replacement style has to get right, both found by looking at
+the result in a viewer:
+
+* **Lines are not only lines.** GeoServer wraps each one in a `MultiGeometry`
+  alongside a `Point` used purely as an anchor, and hides that point with a
+  zero-alpha `IconStyle`. A style that supplies only a `LineStyle` lets the
+  viewer fall back to its default pushpin, and every line renders as a marker.
+  Generated styles therefore carry a transparent icon and a hidden label too.
+* **Lines are drawn opaque.** The catch-all rule paints at 30% opacity, which
+  washes the darker categories out against imagery. The hue the stylesheet or
+  the server chose is kept; the transparency is not. `opaque_lines=False`
+  reproduces the stylesheet faithfully instead.
 
 An unrecognised filter construct makes its rule non-matching rather than
 matching everything, so an unsupported one leaves features unlabelled instead of

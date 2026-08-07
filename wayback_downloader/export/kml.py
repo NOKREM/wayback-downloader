@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from html import unescape
 from typing import Any, Iterable
 
@@ -306,8 +306,23 @@ def _style_id(label: str) -> str:
 
 
 def _build_style(style_id: str, style: RuleStyle) -> ET.Element:
-    """Build a shared ``<Style>`` element from a rule's drawing instructions."""
+    """Build a shared ``<Style>`` element from a rule's drawing instructions.
+
+    Carries a transparent icon and a hidden label as well as the line. That is
+    not decoration: GeoServer wraps each line in a ``MultiGeometry`` holding a
+    ``Point`` alongside it, purely as an anchor, and hides that point with a
+    zero-alpha ``IconStyle``. A style that omits it lets the viewer fall back to
+    its default pushpin, and every line shows up as a marker instead.
+    """
     element = ET.Element(f"{{{KML_NAMESPACE}}}Style", {"id": style_id})
+
+    icon = ET.SubElement(element, f"{{{KML_NAMESPACE}}}IconStyle")
+    ET.SubElement(icon, f"{{{KML_NAMESPACE}}}color").text = "00ffffff"
+    ET.SubElement(icon, f"{{{KML_NAMESPACE}}}scale").text = "0"
+    label = ET.SubElement(element, f"{{{KML_NAMESPACE}}}LabelStyle")
+    ET.SubElement(label, f"{{{KML_NAMESPACE}}}color").text = "00ffffff"
+    ET.SubElement(label, f"{{{KML_NAMESPACE}}}scale").text = "0"
+
     if style.line_colour or style.line_width:
         line = ET.SubElement(element, f"{{{KML_NAMESPACE}}}LineStyle")
         if style.line_colour:
@@ -318,6 +333,23 @@ def _build_style(style_id: str, style: RuleStyle) -> ET.Element:
         poly = ET.SubElement(element, f"{{{KML_NAMESPACE}}}PolyStyle")
         ET.SubElement(poly, f"{{{KML_NAMESPACE}}}color").text = style.fill_colour
     return element
+
+
+def _make_lines_opaque(placemark: ET.Element) -> bool:
+    """Raise a placemark's inline line colour to full alpha.
+
+    The catch-all rule these fall under draws at 30% opacity, which leaves the
+    darker categories washed out against imagery. The hue the server chose is
+    kept; only the transparency goes.
+    """
+    changed = False
+    for line in (e for e in placemark.iter() if _local(e.tag) == "LineStyle"):
+        for colour in (c for c in line if _local(c.tag) == "color"):
+            value = (colour.text or "").strip()
+            if len(value) == 8 and not value.lower().startswith("ff"):
+                colour.text = f"ff{value[2:]}"
+                changed = True
+    return changed
 
 
 def _restyle(placemark: ET.Element, style_id: str) -> None:
@@ -336,6 +368,7 @@ def apply_stylesheet(
     stylesheet: bytes,
     attribute: str = "sld_rule",
     recolour: bool = True,
+    opaque_lines: bool = True,
 ) -> tuple[bytes, LegendReport]:
     """Label each placemark with the stylesheet rule that selects it.
 
@@ -390,7 +423,14 @@ def apply_stylesheet(
             continue
         style = rule_style(rule)
         if style.is_empty:
+            # The rule selects these but says nothing about drawing them, so the
+            # server's rendering stands -- minus its transparency.
+            if opaque_lines and _make_lines_opaque(placemark):
+                restyled += 1
             continue
+
+        if opaque_lines and style.line_colour and not style.line_colour.startswith("ff"):
+            style = replace(style, line_colour=f"ff{style.line_colour[2:]}")
 
         style_id = _style_id(rule.label)
         shared[style_id] = style

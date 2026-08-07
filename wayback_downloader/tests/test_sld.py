@@ -228,17 +228,57 @@ def test_geometry_survives_the_restyle() -> None:
     assert "26.0,39.0" in text and "26.1,39.0" in text
 
 
-def test_a_rule_with_no_symbolizer_keeps_the_server_rendering() -> None:
-    """Nothing to apply means nothing is invented.
+def test_a_rule_with_no_symbolizer_keeps_the_servers_colour() -> None:
+    """Nothing to apply means no colour is invented -- only the alpha changes.
 
     On the live layer this is the faytipi=4 rule, which selects features but
-    defines no stroke of its own.
+    defines no stroke of its own. The server's grey is kept; its 30% opacity is
+    not, since that leaves the line washed out over imagery.
     """
     document = SLD.replace(b'<sld:CssParameter name="stroke">#ff0000</sld:CssParameter>', b"")
-    merged, report = apply_stylesheet(kml_with("2"), document)
+    merged, _ = apply_stylesheet(kml_with("2"), document)
+
+    assert b"ff999999" in merged
+    assert b"4c999999" not in merged
+
+
+def test_transparency_can_be_left_alone() -> None:
+    """The stylesheet's own opacity is honoured when asked for."""
+    document = SLD.replace(b'<sld:CssParameter name="stroke">#ff0000</sld:CssParameter>', b"")
+    merged, report = apply_stylesheet(kml_with("2"), document, opaque_lines=False)
 
     assert report.restyled == 0
     assert b"4c999999" in merged
+
+
+def test_rule_colours_are_made_opaque_too() -> None:
+    """A stroke-opacity in the stylesheet does not survive either."""
+    document = SLD.replace(
+        b'<sld:CssParameter name="stroke">#ff0000</sld:CssParameter>',
+        b'<sld:CssParameter name="stroke">#ff0000</sld:CssParameter>'
+        b'<sld:CssParameter name="stroke-opacity">0.3</sld:CssParameter>',
+    )
+    _, report = apply_stylesheet(kml_with("2"), document)
+    assert report.colours["HOLOSEN FAYI"] == "ff0000ff"
+
+    _, faithful = apply_stylesheet(kml_with("2"), document, opaque_lines=False)
+    assert faithful.colours["HOLOSEN FAYI"] == "4c0000ff"
+
+
+def test_the_point_anchor_stays_hidden() -> None:
+    """GeoServer pairs each line with a Point, and hides it with a clear icon.
+
+    A replacement style that omits the IconStyle lets the viewer fall back to
+    its default pushpin, and every line renders as a marker instead.
+    """
+    merged, _ = apply_stylesheet(kml_with("1"), SLD)
+    root = ET.fromstring(merged)
+    style = next(e for e in root.iter() if e.tag == f"{NS}Style" and e.get("id"))
+
+    icon = next(c for c in style if c.tag == f"{NS}IconStyle")
+    assert next(c.text for c in icon if c.tag == f"{NS}color") == "00ffffff"
+    assert next(c.text for c in icon if c.tag == f"{NS}scale") == "0"
+    assert any(c.tag == f"{NS}LabelStyle" for c in style)
 
 
 def test_recolouring_can_be_turned_off() -> None:
