@@ -737,6 +737,29 @@ def describe_service_error(response: "httpx.Response") -> str:
     return plain[:300] or f"HTTP {response.status_code}"
 
 
+def sibling_service_url(url: str, service: str) -> str:
+    """Point a service URL at a different OGC service on the same server.
+
+    GeoServer publishes ``/geoserver/wms``, ``/geoserver/wfs`` and the combined
+    ``/geoserver/ows`` side by side, so the companion endpoint is usually the
+    same path with its last segment swapped. ``ows`` serves everything and is
+    left alone; anything unrecognised is returned unchanged rather than
+    mangled, and the caller can always pass the URL explicitly.
+    """
+    parts = urlparse(url)
+    segments = parts.path.rstrip("/").split("/")
+    if not segments:
+        return url
+
+    last = segments[-1].lower()
+    if last == "ows":
+        return url
+    if last in {"wms", "wfs", "wmts", "wcs"}:
+        segments[-1] = service
+        return urlunparse(parts._replace(path="/".join(segments)))
+    return url
+
+
 def endpoint_hint(url: str) -> str:
     """Return advice for endpoints that are commonly mistaken for a plain WMS.
 

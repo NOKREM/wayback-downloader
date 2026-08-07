@@ -1030,6 +1030,62 @@ def wfs(
 
 @app.command()
 @handle_errors
+def kml(
+    service_url: Annotated[str, typer.Argument(help="WMS service endpoint URL.")],
+    layer: Annotated[str, typer.Option("--layer", "--layers", help="Layer name.")],
+    west: Annotated[float, typer.Option("--west", help="Western longitude.")],
+    south: Annotated[float, typer.Option("--south", help="Southern latitude.")],
+    east: Annotated[float, typer.Option("--east", help="Eastern longitude.")],
+    north: Annotated[float, typer.Option("--north", help="Northern latitude.")],
+    wfs_url: Annotated[
+        Optional[str],
+        typer.Option("--wfs-url", help="WFS endpoint, if it is not the WMS one with /wfs."),
+    ] = None,
+    size: SizeOption = "2048",
+    max_features: Annotated[
+        Optional[int], typer.Option("--max-features", help="Cap the features queried.")
+    ] = None,
+    cql_filter: Annotated[
+        Optional[str], typer.Option("--filter", help="CQL filter applied to the features.")
+    ] = None,
+    output: OutputOption = None,
+) -> None:
+    """Build a KML with both the layer's styling and its attributes.
+
+    WMS renders the styling but leaves the attributes in a description balloon;
+    WFS carries the attributes but no styling. This fetches both and splices
+    them together, matching placemarks to features by id.
+    """
+    box = validate_bbox(west, south, east, north)
+    width, height = parse_size(size)
+
+    async def run() -> None:
+        async with OgcService(use_cache=_STATE["cache"], progress=_progress()) as service:
+            result, report = await service.download_styled_kml(
+                service_url,
+                layer,
+                box,
+                width=width,
+                height=height,
+                wfs_url=wfs_url,
+                max_features=max_features,
+                cql_filter=cql_filter,
+                output_dir=output,
+            )
+            console.print(f"\n[success]Saved[/success] {result.image_path}")
+            print_kv("Placemarks", report.placemarks)
+            print_kv("Matched features", f"{report.matched} of {report.features} fetched")
+            print_kv("Attributes attached", report.attributes_added)
+            if report.unmatched_placemarks:
+                print_kv("Unmatched", f"{report.unmatched_placemarks} (no attributes)")
+            print_kv("Written", f"{result.image_path.stat().st_size:,} bytes")
+            print_kv("Metadata", result.metadata_path.name)
+
+    _run(run())
+
+
+@app.command()
+@handle_errors
 def endpoints() -> None:
     """Show the REST endpoints discovered at runtime."""
 

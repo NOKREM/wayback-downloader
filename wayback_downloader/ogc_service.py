@@ -29,9 +29,11 @@ from wayback_downloader.api.ogc import (
     normalize_image_format,
     pillow_writer,
     resolve_format,
+    sibling_service_url,
     wms_getmap_url,
     wmts_tile_url,
 )
+from wayback_downloader.export.kml import MergeReport, merge_attributes
 from wayback_downloader.api.ogc import _with_query
 from wayback_downloader.api.wfs import (
     WfsCapabilities,
@@ -232,6 +234,95 @@ class OgcService:
                 **summary,
             },
         )
+
+    async def download_styled_kml(
+        self,
+        service_url: str,
+        layer: str,
+        bbox: BoundingBox,
+        width: int = 2048,
+        height: int = 2048,
+        wfs_url: str | None = None,
+        wms_version: str = "1.3.0",
+        wfs_version: str = "2.0.0",
+        max_features: int | None = None,
+        cql_filter: str | None = None,
+        output_dir: Path | None = None,
+        stem: str | None = None,
+    ) -> tuple[OgcResult, MergeReport]:
+        """Produce a KML carrying both the layer's styling and its attributes.
+
+        Fetches the styled KML from WMS and the features from WFS, then splices
+        the attributes into the styled document by feature id. The two requests
+        run concurrently since neither depends on the other.
+
+        ``width`` and ``height`` do not size an image here -- nothing is
+        rasterised -- but WMS requires them and uses them to decide which
+        features fall inside the view, so they are kept generous.
+        """
+        features_url = wfs_url or sibling_service_url(service_url, "wfs")
+
+        styled_request = self.client.fetch_image(
+            wms_getmap_url(
+                service_url,
+                layer,
+                bbox,
+                width,
+                height,
+                version=wms_version,
+                image_format="application/vnd.google-earth.kml+xml",
+            ),
+            "GetMap (styled KML)",
+            expect_raster=False,
+        )
+        features_request = self.client.fetch_image(
+            wfs_getfeature_url(
+                features_url,
+                layer,
+                version=wfs_version,
+                bbox=bbox,
+                output_format="application/json",
+                max_features=max_features,
+                cql_filter=cql_filter,
+            ),
+            "GetFeature (attributes)",
+            expect_raster=False,
+        )
+
+        with self.progress.task("Styled KML", total=2) as task:
+            styled, features = await asyncio.gather(styled_request, features_request)
+            task.advance(2)
+
+        merged, report = await asyncio.to_thread(merge_attributes, styled, features)
+        logger.info("Merged styled KML: %s", report.summary())
+
+        name = stem or safe_stem(f"kml_{layer}", "kml")
+        target = output_dir or self.settings.output_dir
+        target.mkdir(parents=True, exist_ok=True)
+
+        document_path = target / f"{name}.kml"
+        document_path.write_bytes(merged)
+
+        result = self._write_sidecar(
+            document_path,
+            bbox,
+            2,
+            {
+                "service": "WMS+WFS",
+                "service_url": service_url,
+                "wfs_url": features_url,
+                "layer": layer,
+                "format": "application/vnd.google-earth.kml+xml",
+                "rasterised": False,
+                "styled": True,
+                "placemarks": report.placemarks,
+                "features_matched": report.matched,
+                "unmatched_placemarks": report.unmatched_placemarks,
+                "attributes_attached": report.attributes_added,
+                "byte_size": len(merged),
+            },
+        )
+        return result, report
 
     async def download_wmts(
         self,

@@ -526,6 +526,37 @@ than guessed at.
 > saying so. GeoServer's `kmattr` vendor parameter does not bridge the gap —
 > tested, and it changed nothing.
 
+### A KML with both — `kml`
+
+The `kml` command fetches both halves and splices them together:
+
+```bash
+python main.py kml https://example.org/geoserver/wms --layer afad:DFY_GEO_WGS84_2013 \
+  --west 26 --south 38 --east 27 --north 39 --max-features 500
+```
+
+The two services agree on feature identifiers — GeoServer writes
+`<Placemark id="LAYER.134">` and the matching GeoJSON feature is
+`"id": "LAYER.134"` — so placemarks are matched to features exactly rather than
+by comparing geometry. The styled KML is kept whole and each placemark gains an
+`<ExtendedData>` block:
+
+```
+Placemarks             103
+Matched features       103 of 103 fetched
+Attributes attached    5871
+```
+
+Verified on live data: style, colour and width counts were identical before and
+after, `ExtendedData` went from 0 to 103, geometry was untouched, and the result
+still parses with its KML namespace intact.
+
+The WFS endpoint is derived from the WMS one by swapping the trailing path
+segment (`/geoserver/wms` → `/geoserver/wfs`); `--wfs-url` overrides that when
+the services live elsewhere. Re-merging an already-merged file replaces its
+attributes rather than duplicating them, and a placemark with no matching
+feature is kept and reported rather than dropped.
+
 ### Cache and diagnostics
 
 ```bash
