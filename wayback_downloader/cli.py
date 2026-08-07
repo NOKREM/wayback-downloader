@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import functools
+import json
 from pathlib import Path
 from typing import Annotated, Any, Callable, Optional, TypeVar
 
@@ -13,6 +14,7 @@ from rich.table import Table
 
 from wayback_downloader import __version__
 from wayback_downloader.api.wayback import filter_by_date_range
+from wayback_downloader.api.wfs import SUPPORTED_VERSIONS
 from wayback_downloader.config import get_settings
 from wayback_downloader.exceptions import (
     ImageryUnavailableError,
@@ -899,6 +901,129 @@ def wms(
                 output_dir=output,
             )
             _report_ogc(result, "GetMap requests")
+
+    _run(run())
+
+
+@app.command()
+@handle_errors
+def wfs(
+    service_url: Annotated[str, typer.Argument(help="WFS service endpoint URL.")],
+    type_name: Annotated[
+        Optional[str], typer.Option("--layer", "--typename", help="Feature type name.")
+    ] = None,
+    west: Annotated[Optional[float], typer.Option("--west", help="Western longitude.")] = None,
+    south: Annotated[Optional[float], typer.Option("--south", help="Southern latitude.")] = None,
+    east: Annotated[Optional[float], typer.Option("--east", help="Eastern longitude.")] = None,
+    north: Annotated[Optional[float], typer.Option("--north", help="Northern latitude.")] = None,
+    list_layers: Annotated[
+        bool, typer.Option("--list-layers", help="List the service's feature types and exit.")
+    ] = False,
+    output_format: Annotated[
+        Optional[str],
+        typer.Option(
+            "--format",
+            "-f",
+            help="Output format: geojson, gml, csv, shp, or a full identifier.",
+        ),
+    ] = None,
+    max_features: Annotated[
+        Optional[int], typer.Option("--max-features", help="Cap the number of features returned.")
+    ] = None,
+    start_index: Annotated[
+        Optional[int], typer.Option("--start-index", help="Skip this many features (paging).")
+    ] = None,
+    cql_filter: Annotated[
+        Optional[str], typer.Option("--filter", help="CQL filter, e.g. \"TIP='Normal'\".")
+    ] = None,
+    sort_by: Annotated[Optional[str], typer.Option("--sort-by", help="Sort by attribute.")] = None,
+    properties: Annotated[
+        Optional[str], typer.Option("--properties", help="Comma-separated attributes to return.")
+    ] = None,
+    version: Annotated[
+        str, typer.Option("--wfs-version", help="WFS version: 2.0.0, 1.1.0 or 1.0.0.")
+    ] = "2.0.0",
+    output: OutputOption = None,
+) -> None:
+    """Download vector features from any WFS service, or list what it publishes.
+
+    Unlike the imagery commands this returns the features themselves -- geometry
+    and attributes -- and writes the response through unchanged.
+    """
+    if version not in SUPPORTED_VERSIONS:
+        raise ValidationError(
+            f"Unsupported WFS version {version!r}; use one of {', '.join(SUPPORTED_VERSIONS)}."
+        )
+
+    corners = (west, south, east, north)
+    if any(value is not None for value in corners) and any(value is None for value in corners):
+        raise ValidationError("A bounding box needs all four of --west/--south/--east/--north.")
+    box = (
+        validate_bbox(west, south, east, north)
+        if west is not None and south is not None and east is not None and north is not None
+        else None
+    )
+
+    async def run() -> None:
+        async with OgcService(use_cache=_STATE["cache"], progress=_progress()) as service:
+            if list_layers:
+                capabilities = await service.wfs_capabilities(service_url, version)
+                table = Table(
+                    title=f"{capabilities.title} -- "
+                    f"{len(capabilities.feature_types)} feature type(s), "
+                    f"WFS {capabilities.version}"
+                )
+                table.add_column("Name", style="cyan")
+                table.add_column("Title")
+                table.add_column("Bounds (W S E N)", style="dim")
+                table.add_column("CRS", style="dim")
+                for item in capabilities.feature_types:
+                    extent = (
+                        f"{item.bounds.west:.3f} {item.bounds.south:.3f} "
+                        f"{item.bounds.east:.3f} {item.bounds.north:.3f}"
+                        if item.bounds
+                        else "-"
+                    )
+                    table.add_row(item.name, item.title[:34], extent, item.default_crs)
+                console.print(table)
+                console.print(
+                    f"[field]Formats offered:[/field] "
+                    f"[muted]{', '.join(capabilities.formats) or 'none advertised'}[/muted]"
+                )
+                console.print(
+                    "[muted]Pass one to --format (geojson, gml, csv and shp are accepted as "
+                    "shorthands). Narrow a download with --bbox corners, --filter or "
+                    "--max-features.[/muted]"
+                )
+                return
+
+            if type_name is None:
+                raise ValidationError("--layer is required unless --list-layers is used.")
+
+            result = await service.download_wfs(
+                service_url,
+                type_name,
+                version=version,
+                bbox=box,
+                output_format=output_format,
+                max_features=max_features,
+                start_index=start_index,
+                cql_filter=cql_filter,
+                sort_by=sort_by,
+                property_names=properties,
+                output_dir=output,
+            )
+            summary = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+            console.print(f"\n[success]Saved[/success] {result.image_path}")
+            print_kv("Format", summary.get("format", "-"))
+            if "feature_count" in summary:
+                print_kv("Features", summary["feature_count"])
+            if summary.get("numberMatched") is not None:
+                print_kv("Matched on server", summary["numberMatched"])
+            if summary.get("geometry_types"):
+                print_kv("Geometry", ", ".join(summary["geometry_types"]))
+            print_kv("Written", f"{result.image_path.stat().st_size:,} bytes")
+            print_kv("Metadata", result.metadata_path.name)
 
     _run(run())
 

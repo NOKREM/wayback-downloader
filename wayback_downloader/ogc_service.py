@@ -32,6 +32,16 @@ from wayback_downloader.api.ogc import (
     wms_getmap_url,
     wmts_tile_url,
 )
+from wayback_downloader.api.ogc import _with_query
+from wayback_downloader.api.wfs import (
+    WfsCapabilities,
+    normalize_output_format,
+    output_extension,
+    parse_wfs_capabilities,
+    resolve_output_format,
+    summarize_features,
+    wfs_getfeature_url,
+)
 from wayback_downloader.config import Settings, get_settings
 from wayback_downloader.exceptions import ImageryUnavailableError, ValidationError
 from wayback_downloader.export import geotiff
@@ -112,6 +122,113 @@ class OgcService:
     async def wms_capabilities(self, service_url: str, version: str = "1.3.0") -> WmsCapabilities:
         """Fetch and parse a WMS service's capabilities."""
         return await self.client.wms_capabilities(service_url, version)
+
+    async def wfs_capabilities(self, service_url: str, version: str = "2.0.0") -> WfsCapabilities:
+        """Fetch and parse a WFS service's capabilities."""
+        url = service_url
+        if "request=" not in url.lower():
+            url = _with_query(
+                url, {"SERVICE": "WFS", "REQUEST": "GetCapabilities", "VERSION": version}
+            )
+        response = await self.client._get(url, "text/xml,application/xml,*/*", "WFS capabilities")
+        return parse_wfs_capabilities(response.text, service_url)
+
+    async def download_wfs(
+        self,
+        service_url: str,
+        type_name: str,
+        version: str = "2.0.0",
+        bbox: BoundingBox | None = None,
+        output_format: str | None = None,
+        max_features: int | None = None,
+        start_index: int | None = None,
+        cql_filter: str | None = None,
+        sort_by: str | None = None,
+        property_names: str | None = None,
+        output_dir: Path | None = None,
+        stem: str | None = None,
+        validate: bool = True,
+    ) -> OgcResult:
+        """Download features from a WFS service.
+
+        Nothing here is rendered: the response is vector data and is written
+        through byte for byte. Only GeoJSON is inspected afterwards, to report
+        how many features arrived.
+        """
+        chosen_format = normalize_output_format(output_format) if output_format else None
+        extent = bbox
+
+        if validate:
+            capabilities = await self.wfs_capabilities(service_url, version)
+            feature_type = capabilities.feature_type(type_name)
+            type_name = feature_type.name
+            chosen_format = resolve_output_format(
+                output_format, capabilities.formats, capabilities.default_format
+            )
+            if extent is None:
+                extent = feature_type.bounds
+
+        url = wfs_getfeature_url(
+            service_url,
+            type_name,
+            version=version,
+            bbox=bbox,
+            output_format=chosen_format,
+            max_features=max_features,
+            start_index=start_index,
+            cql_filter=cql_filter,
+            sort_by=sort_by,
+            property_names=property_names,
+        )
+
+        with self.progress.task("WFS features", total=1) as task:
+            payload = await self.client.fetch_image(url, "GetFeature", expect_raster=False)
+            task.advance(1)
+
+        resolved_format = chosen_format or "application/json"
+        summary = summarize_features(payload, resolved_format)
+        name = stem or safe_stem(f"wfs_{type_name}", "wfs")
+        target = output_dir or self.settings.output_dir
+        target.mkdir(parents=True, exist_ok=True)
+
+        document_path = target / f"{name}.{output_extension(resolved_format)}"
+        document_path.write_bytes(payload)
+        logger.info(
+            "Wrote %s (%s)",
+            document_path.name,
+            (
+                f"{summary['feature_count']} feature(s)"
+                if "feature_count" in summary
+                else f"{len(payload)} bytes"
+            ),
+        )
+
+        return self._write_sidecar(
+            document_path,
+            extent or BoundingBox(west=-180, south=-85, east=180, north=85),
+            1,
+            {
+                "service": "WFS",
+                "service_url": service_url,
+                "type_name": type_name,
+                "version": version,
+                "format": resolved_format,
+                "rasterised": False,
+                "requested_bbox": (
+                    None
+                    if bbox is None
+                    else {
+                        "west": bbox.west,
+                        "south": bbox.south,
+                        "east": bbox.east,
+                        "north": bbox.north,
+                    }
+                ),
+                "max_features": max_features,
+                "cql_filter": cql_filter,
+                **summary,
+            },
+        )
 
     async def download_wmts(
         self,

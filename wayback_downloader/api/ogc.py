@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
@@ -158,8 +158,16 @@ def normalize_image_format(value: str) -> str:
     return _FORMAT_ALIASES.get(text.lower(), text)
 
 
-def resolve_format(requested: str | None, advertised: Sequence[str], default: str) -> str:
-    """Pick the image format to request, checking it against what is offered.
+def resolve_format(
+    requested: str | None,
+    advertised: Sequence[str],
+    default: str,
+    normalizer: Callable[[str], str] | None = None,
+) -> str:
+    """Pick the format to request, checking it against what is offered.
+
+    ``normalizer`` expands shorthands and defaults to the image table; WFS
+    passes its own, since ``geojson`` and ``shp`` mean nothing here.
 
     Validating here turns a server-side exception -- which arrives as XML with
     an HTTP 200 and would otherwise surface as a corrupt tile -- into an error
@@ -172,7 +180,7 @@ def resolve_format(requested: str | None, advertised: Sequence[str], default: st
     if requested is None:
         return default
 
-    wanted = normalize_image_format(requested)
+    wanted = (normalizer or normalize_image_format)(requested)
     if not advertised:
         return wanted
 

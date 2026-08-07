@@ -469,6 +469,48 @@ The generic path is verified against the real Wayback WMTS endpoint: the same
 release fetched through the capabilities-driven client and through the native
 config-driven client comes back byte-identical.
 
+### WFS — the features themselves
+
+WMS and WMTS return pictures. WFS returns the geometry and attributes, so
+nothing is rendered or tiled and the response is written through as received.
+
+```bash
+python main.py wfs https://example.org/geoserver/wfs --list-layers
+
+python main.py wfs https://example.org/geoserver/wfs --layer afad:DFY_GEO_WGS84_2013 \
+  --west 26 --south 38 --east 28 --north 39.5 --format geojson --max-features 200
+
+# Attribute filtering, paging and column selection
+python main.py wfs https://example.org/geoserver/wfs --layer afad:DFY_GEO_WGS84_2013 \
+  --filter "FAYTIPI=2" --sort-by FAYNO --start-index 500 --properties FAYADI,FAYTIPI
+```
+
+`--format` takes `geojson`, `gml`, `csv`, `shp`, `kml` or a full identifier.
+Matching is by equivalence family, because the same server changes vocabulary
+between versions — this GeoServer's 2.0.0 advertises `application/json` and
+`shape-zip` where its 1.0.0 advertises `JSON` and `SHAPE-ZIP`.
+
+> **The bounding box needs its CRS spelled a particular way.** GeoServer reads
+> a bare `EPSG:4326` as longitude-first and `urn:ogc:def:crs:EPSG::4326` as
+> latitude-first, so the CRS spelling and the coordinate order have to agree.
+> Pairing latitude-first coordinates with the short code returns **zero
+> features and HTTP 200** — no error, just nothing. Requests therefore send the
+> URN with latitude-first for 1.1.0 and 2.0.0, and the short code with
+> longitude-first for 1.0.0. Verified against a live service: all three
+> versions return the same 103 features for the same box.
+
+The three versions also disagree on parameter names, which the client handles:
+
+| Version | Type parameter | Limit |
+|---|---|---|
+| 1.0.0, 1.1.0 | `typeName` | `maxFeatures` |
+| 2.0.0 | `typeNames` | `count` |
+
+GeoJSON responses are summarised in the sidecar — feature count, geometry
+types, attribute names, and how many the server matched before the limit
+applied. GML, CSV and shapefile archives are written through unparsed rather
+than guessed at.
+
 ### Cache and diagnostics
 
 ```bash
