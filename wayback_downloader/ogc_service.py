@@ -34,7 +34,9 @@ from wayback_downloader.api.ogc import (
     wmts_tile_url,
 )
 from wayback_downloader.export.kml import (
+    LegendReport,
     MergeReport,
+    apply_stylesheet,
     attributes_from_descriptions,
     merge_attributes,
 )
@@ -50,7 +52,11 @@ from wayback_downloader.api.wfs import (
     wfs_getfeature_url,
 )
 from wayback_downloader.config import Settings, get_settings
-from wayback_downloader.exceptions import ImageryUnavailableError, ValidationError
+from wayback_downloader.exceptions import (
+    ExportError,
+    ImageryUnavailableError,
+    ValidationError,
+)
 from wayback_downloader.export import geotiff
 from wayback_downloader.gis import stitch
 from wayback_downloader.gis.projection import ground_resolution
@@ -286,7 +292,8 @@ class OgcService:
         cql_filter: str | None = None,
         output_dir: Path | None = None,
         stem: str | None = None,
-    ) -> tuple[OgcResult, MergeReport]:
+        stylesheet: bytes | None = None,
+    ) -> tuple[OgcResult, MergeReport, LegendReport | None]:
         """Produce a KML carrying both the layer's styling and its attributes.
 
         Fetches the styled KML from WMS and the features from WFS, then splices
@@ -350,6 +357,17 @@ class OgcService:
             merged, report = await asyncio.to_thread(merge_attributes, styled, features)
         logger.info("Merged styled KML: %s", report.summary())
 
+        # Applied after the merge, not before: the rules filter on the feature's
+        # own attributes, which only exist once they have been attached.
+        legend: LegendReport | None = None
+        if stylesheet:
+            try:
+                merged, applied = await asyncio.to_thread(apply_stylesheet, merged, stylesheet)
+                legend = applied
+                logger.info("Applied the stylesheet: %s", applied.summary())
+            except ExportError as exc:
+                logger.warning("Could not classify by stylesheet: %s", exc)
+
         name = stem or safe_stem(f"kml_{layer}", "kml")
         target = output_dir or self.settings.output_dir
         target.mkdir(parents=True, exist_ok=True)
@@ -375,9 +393,10 @@ class OgcService:
                 "unmatched_placemarks": report.unmatched_placemarks,
                 "attributes_attached": report.attributes_added,
                 "byte_size": len(merged),
+                **({"legend": legend.groups, "classified": legend.labelled} if legend else {}),
             },
         )
-        return result, report
+        return result, report, legend
 
     async def download_wmts(
         self,

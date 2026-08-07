@@ -19,11 +19,12 @@ from __future__ import annotations
 import json
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import unescape
 from typing import Any, Iterable
 
 from wayback_downloader.exceptions import ExportError
+from wayback_downloader.export.sld import classify, parse_sld
 from wayback_downloader.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -279,6 +280,141 @@ def attributes_from_descriptions(styled_kml: bytes) -> tuple[bytes, MergeReport]
             strategy="description",
         ),
     )
+
+
+@dataclass
+class LegendReport:
+    """How the stylesheet's rules mapped onto the placemarks."""
+
+    placemarks: int
+    labelled: int
+    groups: dict[str, int] = field(default_factory=dict)
+
+    def summary(self) -> str:
+        """A one-line description for logs and the CLI."""
+        listed = ", ".join(f"{name} ({count})" for name, count in self.groups.items())
+        return f"{self.labelled}/{self.placemarks} placemark(s) classified: {listed}"
+
+
+def apply_stylesheet(
+    styled_kml: bytes, stylesheet: bytes, attribute: str = "sld_rule"
+) -> tuple[bytes, LegendReport]:
+    """Label each placemark with the stylesheet rule that selects it.
+
+    The rule is decided by evaluating the SLD's filters against the placemark's
+    own attributes, which requires those attributes to have been promoted into
+    ``ExtendedData`` first. Placemarks are then grouped into a ``<Folder>`` per
+    rule, which is what turns an anonymous KML into one a viewer can show as a
+    legend with a togglable entry per category.
+
+    The styling itself is left exactly as the server rendered it. This adds the
+    names it left out; it does not re-render anything.
+    """
+    ET.register_namespace("", KML_NAMESPACE)
+    try:
+        root = ET.fromstring(styled_kml)
+    except ET.ParseError as exc:
+        raise ExportError(f"The styled KML could not be parsed: {exc}") from exc
+
+    rules = parse_sld(stylesheet)
+    documents = [element for element in root.iter() if _local(element.tag) == "Document"]
+    if not documents:
+        raise ExportError("The styled KML has no Document to organise.")
+    document = documents[0]
+
+    placemarks = [element for element in root.iter() if _local(element.tag) == "Placemark"]
+    if not placemarks:
+        raise ExportError("The styled KML contains no placemarks to classify.")
+
+    grouped: dict[str, list[ET.Element]] = {}
+    labelled = 0
+
+    for placemark in placemarks:
+        attributes = _existing_attributes(placemark) or _description_attributes(placemark)
+        rule = classify(rules, attributes) if attributes else None
+        if rule is None:
+            grouped.setdefault("Unclassified", []).append(placemark)
+            continue
+
+        labelled += 1
+        grouped.setdefault(rule.label, []).append(placemark)
+        _add_attribute(placemark, attribute, rule.label)
+
+    # Detach every placemark from wherever it sat, then re-add it under a folder
+    # named for its rule. Parents are found by search because ElementTree has no
+    # parent pointers.
+    for parent in root.iter():
+        for child in list(parent):
+            if _local(child.tag) == "Placemark":
+                parent.remove(child)
+
+    # Whatever folders the document already had are now empty, since every
+    # placemark was lifted out of them. Left in place they would show up as
+    # phantom legend entries.
+    _drop_empty_folders(root)
+
+    for name, members in grouped.items():
+        folder = ET.SubElement(document, f"{{{KML_NAMESPACE}}}Folder")
+        ET.SubElement(folder, f"{{{KML_NAMESPACE}}}name").text = name
+        for member in members:
+            folder.append(member)
+
+    report = LegendReport(
+        placemarks=len(placemarks),
+        labelled=labelled,
+        groups={name: len(members) for name, members in grouped.items()},
+    )
+    if labelled == 0:
+        raise ExportError(
+            "No placemark matched any rule in the stylesheet. The attributes the "
+            "rules filter on are probably absent -- run the merge so they are "
+            "attached before the stylesheet is applied."
+        )
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True), report
+
+
+def _drop_empty_folders(root: ET.Element) -> int:
+    """Remove folders left holding nothing but their own name."""
+    removed = 0
+    for parent in list(root.iter()):
+        for child in list(parent):
+            if _local(child.tag) != "Folder":
+                continue
+            if any(_local(grandchild.tag) != "name" for grandchild in child):
+                continue
+            parent.remove(child)
+            removed += 1
+    return removed
+
+
+def _existing_attributes(placemark: ET.Element) -> dict[str, str]:
+    """Read back attributes already attached as ExtendedData."""
+    extended = next((c for c in placemark if _local(c.tag) == "ExtendedData"), None)
+    if extended is None:
+        return {}
+
+    found: dict[str, str] = {}
+    for data in extended:
+        name = data.get("name")
+        if not name:
+            continue
+        value = next((v.text for v in data if _local(v.tag) == "value"), None)
+        found[name] = value or ""
+    return found
+
+
+def _add_attribute(placemark: ET.Element, name: str, value: str) -> None:
+    """Add a single ExtendedData entry without disturbing the others."""
+    extended = next((c for c in placemark if _local(c.tag) == "ExtendedData"), None)
+    if extended is None:
+        extended = ET.SubElement(placemark, f"{{{KML_NAMESPACE}}}ExtendedData")
+
+    for data in extended:
+        if data.get("name") == name:
+            extended.remove(data)
+
+    data = ET.SubElement(extended, f"{{{KML_NAMESPACE}}}Data", {"name": name})
+    ET.SubElement(data, f"{{{KML_NAMESPACE}}}value").text = value
 
 
 def _attach(placemark: ET.Element, properties: dict[str, Any]) -> None:

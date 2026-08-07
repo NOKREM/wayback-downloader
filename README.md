@@ -639,6 +639,37 @@ python main.py kml https://example.org/geoserver/mta/wms --layer DRYGEO2 --sld \
 It combines with `--all-layers` to pull every layer's stylesheet in one run. A
 layer whose style cannot be fetched is reported and the download continues.
 
+On `kml`, `--sld` does more than save the file: it **uses** it. A styled KML
+shows colours but names nothing — GeoServer writes an anonymous `<Style>` into
+each placemark. The names live on the SLD's rules, each guarded by a filter over
+the feature's own attributes, so evaluating those filters against the attributes
+just merged in tells you what each placemark actually is. Placemarks are then
+grouped into a `<Folder>` per rule and tagged with an `sld_rule` attribute,
+which is what a viewer shows as a legend with a togglable entry per category:
+
+```
+┌────────────────────────────────────────┬────────────┐
+│ Rule                                   │ Placemarks │
+├────────────────────────────────────────┼────────────┤
+│ HOLOSEN FAYI                           │        417 │
+│ KUVATERNER FAYI                        │        129 │
+│ OLASI KUVATERNER FAYI VEYA CIZGISELLIK │         73 │
+│ DEPREM YUZEY KIRIGI                    │         41 │
+└────────────────────────────────────────┴────────────┘
+```
+
+> **Colour matching would be easier and wrong.** In that extent all 660
+> placemarks render in the catch-all rule's grey, because the rule that
+> actually selects them (`faytipi=4`) defines no stroke of its own. Matching on
+> colour would file every one under "DIGER FAY HATLARI". The filters put them
+> where they belong — verified: 660 of 660 landed in the folder their own
+> `faytipi` selects, none in the wrong one, and all 660 kept their `LineStyle`.
+
+An unrecognised filter construct makes its rule non-matching rather than
+matching everything, so an unsupported one leaves features unlabelled instead of
+labelling them wrongly. The styling itself is never touched — this adds the
+names the server left out; it does not re-render anything.
+
 That is the style definition rather than a rendering of it — 10 rules, 8
 filters, stroke colours and widths on the MTA fault layer — which is what you
 need to reproduce the cartography elsewhere or to see why a layer draws as it

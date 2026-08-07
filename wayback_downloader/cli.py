@@ -1280,11 +1280,13 @@ def kml(
             names = [item.name for item in capabilities.layers] if capabilities else []
             selected = _selected_layers(names, layer, all_layers)
 
-            async def fetch(name: str) -> tuple[OgcResult, Any]:
+            async def fetch(name: str) -> tuple[OgcResult, Any, Any]:
                 """Build one layer's merged KML."""
+                stylesheet: bytes | None = None
                 if sld:
                     try:
                         path = await service.download_sld(service_url, name, output_dir=output)
+                        stylesheet = path.read_bytes()
                         console.print(f"  [success]style:[/success] {path.name}")
                     except WaybackError as exc:
                         error_console.print(f"  [warn]no stylesheet:[/warn] {exc}")
@@ -1303,16 +1305,17 @@ def kml(
                     max_features=max_features,
                     cql_filter=cql_filter,
                     output_dir=output,
+                    stylesheet=stylesheet,
                 )
 
             if all_layers:
                 done, failed = await _download_each(selected, fetch)
-                for name, (_, report) in done:
+                for name, (_, report, _legend) in done:
                     console.print(f"  [muted]{name}: {report.summary()}[/muted]")
                 _report_batch(done, failed, output or service.settings.output_dir)
                 return
 
-            result, report = await fetch(selected[0])
+            result, report, legend = await fetch(selected[0])
             console.print(f"\n[success]Saved[/success] {result.image_path}")
             print_kv("Placemarks", report.placemarks)
             print_kv("Matched features", f"{report.matched} of {report.features} fetched")
@@ -1321,6 +1324,14 @@ def kml(
                 print_kv("Unmatched", f"{report.unmatched_placemarks} (no attributes)")
             print_kv("Written", f"{result.image_path.stat().st_size:,} bytes")
             print_kv("Metadata", result.metadata_path.name)
+
+            if legend:
+                table = Table(title="Legend, from the stylesheet's rules")
+                table.add_column("Rule", style="cyan")
+                table.add_column("Placemarks", justify="right")
+                for rule_name, count in legend.groups.items():
+                    table.add_row(rule_name, str(count))
+                console.print(table)
 
     _run(run())
 
