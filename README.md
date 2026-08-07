@@ -578,11 +578,20 @@ python main.py kml https://example.org/geoserver/wms --layer afad:DFY_GEO_WGS84_
   --west 26 --south 38 --east 27 --north 39 --max-features 500
 ```
 
-The two services agree on feature identifiers — GeoServer writes
-`<Placemark id="LAYER.134">` and the matching GeoJSON feature is
-`"id": "LAYER.134"` — so placemarks are matched to features exactly rather than
-by comparing geometry. The styled KML is kept whole and each placemark gains an
-`<ExtendedData>` block:
+Placemarks are joined to features by identifier where that works — GeoServer
+writes `<Placemark id="LAYER.134">` and the matching GeoJSON feature is
+`"id": "LAYER.134"`, which is exact and cheap.
+
+For a layer published **without a primary key** it does not work: GeoServer
+mints a fresh `fid-...` on every request, so the two responses label the same
+feature differently no matter how they are fetched. Those layers fall back to
+matching on coordinates, which the services do agree on — they merely print
+them differently (`42.709830000000004` against `42.70983`), so comparison is at
+about centimetre precision. Two features at identical coordinates cannot be
+told apart and are left unmatched rather than guessed at.
+
+The styled KML is kept whole and each placemark gains an `<ExtendedData>`
+block:
 
 ```
 Placemarks             103
@@ -593,6 +602,13 @@ Attributes attached    5871
 Verified on live data: style, colour and width counts were identical before and
 after, `ExtendedData` went from 0 to 103, geometry was untouched, and the result
 still parses with its KML namespace intact.
+
+The geometry fallback was checked the same way, on a 1670-feature earthquake
+layer whose `fid-` identifiers made an id join impossible. All 1670 placemarks
+matched. That layer also carries its own `latitude` and `longitude` as
+attributes, which makes the join self-checking: for every one of the 1670, the
+attached values equalled the placemark's own coordinates exactly — matching the
+right feature, not merely matching something.
 
 The WFS endpoint is derived from the WMS one by swapping the trailing path
 segment (`/geoserver/wms` → `/geoserver/wfs`); `--wfs-url` overrides that when

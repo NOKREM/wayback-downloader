@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 from wayback_downloader.exceptions import ExportError
 from wayback_downloader.utils.logger import get_logger
@@ -38,6 +38,8 @@ class MergeReport:
     matched: int
     unmatched_placemarks: int
     attributes_added: int
+    # Which join actually worked: "id" or "geometry".
+    strategy: str = "id"
 
     @property
     def complete(self) -> bool:
@@ -47,8 +49,8 @@ class MergeReport:
     def summary(self) -> str:
         """A one-line description for logs and the CLI."""
         return (
-            f"{self.matched}/{self.placemarks} placemark(s) matched a feature, "
-            f"{self.attributes_added} attribute value(s) attached"
+            f"{self.matched}/{self.placemarks} placemark(s) matched a feature "
+            f"by {self.strategy}, {self.attributes_added} attribute value(s) attached"
         )
 
 
@@ -57,8 +59,15 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _feature_properties(geojson: bytes) -> dict[str, dict[str, Any]]:
-    """Index a GeoJSON FeatureCollection's properties by feature id."""
+def _index_features(
+    geojson: bytes,
+) -> tuple[dict[str, dict[str, Any]], dict[GeometryKey, dict[str, Any]]]:
+    """Index a FeatureCollection's properties by id and, separately, by geometry.
+
+    Both indexes are built because either can be the useless one: a layer with a
+    primary key has stable ids, a layer without one has ids that change per
+    request but geometry that does not.
+    """
     try:
         document = json.loads(geojson)
     except (ValueError, UnicodeDecodeError) as exc:
@@ -68,15 +77,92 @@ def _feature_properties(geojson: bytes) -> dict[str, dict[str, Any]]:
     if not isinstance(features, list):
         raise ExportError("The feature data contains no FeatureCollection features.")
 
-    indexed: dict[str, dict[str, Any]] = {}
+    by_id: dict[str, dict[str, Any]] = {}
+    by_geometry: dict[GeometryKey, dict[str, Any]] = {}
+    ambiguous: set[GeometryKey] = set()
+
     for feature in features:
         if not isinstance(feature, dict):
             continue
-        identifier = feature.get("id")
         properties = feature.get("properties")
-        if identifier and isinstance(properties, dict):
-            indexed[str(identifier)] = properties
-    return indexed
+        if not isinstance(properties, dict):
+            continue
+
+        identifier = feature.get("id")
+        if identifier:
+            by_id[str(identifier)] = properties
+
+        key = _geojson_geometry_key(feature.get("geometry"))
+        if not key:
+            continue
+        # Two features at identical coordinates cannot be told apart, so neither
+        # is matched rather than attaching one's attributes to the other.
+        if key in by_geometry or key in ambiguous:
+            ambiguous.add(key)
+            by_geometry.pop(key, None)
+        else:
+            by_geometry[key] = properties
+
+    if ambiguous:
+        logger.debug("%d geometry key(s) matched more than one feature", len(ambiguous))
+    return by_id, by_geometry
+
+
+# Coordinates are compared at roughly centimetre precision. The two services
+# describe identical positions but format them differently -- 42.709830000000004
+# against 42.70983 -- so exact string equality matches almost nothing while
+# rounding matches everything.
+_COORDINATE_PRECISION = 7
+
+GeometryKey = tuple[tuple[float, float], ...]
+
+
+def _round_pair(lon: float, lat: float) -> tuple[float, float]:
+    """Reduce a coordinate to the precision the two services agree on."""
+    return round(lon, _COORDINATE_PRECISION), round(lat, _COORDINATE_PRECISION)
+
+
+def _geometry_key(points: Iterable[tuple[float, float]]) -> GeometryKey:
+    """Build a comparable key from a geometry's coordinates.
+
+    Sorted rather than ordered, because the two encodings may wind a ring or
+    split a multi-geometry differently while covering the same positions.
+    """
+    return tuple(sorted(points))
+
+
+def _kml_geometry_key(placemark: ET.Element) -> GeometryKey:
+    """Extract a placemark's coordinates as a comparable key."""
+    points: list[tuple[float, float]] = []
+    for element in placemark.iter():
+        if _local(element.tag) != "coordinates" or not element.text:
+            continue
+        for token in element.text.split():
+            parts = token.split(",")
+            if len(parts) >= 2:
+                try:
+                    points.append(_round_pair(float(parts[0]), float(parts[1])))
+                except ValueError:
+                    continue
+    return _geometry_key(points)
+
+
+def _geojson_geometry_key(geometry: Any) -> GeometryKey:
+    """Extract a GeoJSON geometry's coordinates as a comparable key."""
+    if not isinstance(geometry, dict):
+        return ()
+
+    points: list[tuple[float, float]] = []
+    stack = [geometry.get("coordinates")]
+    while stack:
+        item = stack.pop()
+        if not isinstance(item, (list, tuple)):
+            continue
+        if len(item) >= 2 and all(isinstance(value, (int, float)) for value in item[:2]):
+            points.append(_round_pair(float(item[0]), float(item[1])))
+        else:
+            stack.extend(item)
+    return _geometry_key(points)
 
 
 def _placemark_id(placemark: ET.Element) -> str | None:
@@ -94,36 +180,25 @@ def _placemark_id(placemark: ET.Element) -> str | None:
     return None
 
 
-def _no_match_reason(placemarks: list[ET.Element], properties_by_id: dict[str, Any]) -> str:
-    """Explain why nothing joined, distinguishing the causes that look alike.
+def _no_match_reason(
+    placemarks: list[ET.Element],
+    by_id: dict[str, Any],
+    by_geometry: dict[GeometryKey, Any],
+) -> str:
+    """Explain why nothing joined, once both strategies have failed."""
+    if not by_id and not by_geometry:
+        return "The feature response carried no usable features to match against."
 
-    The common one is not a missing identifier but an unstable one: for a layer
-    without a primary key GeoServer mints a fresh ``fid-...`` per request, so
-    the WMS and WFS responses name the same feature differently and no join is
-    possible however the two are fetched.
-    """
-    kml_ids = [identifier for placemark in placemarks if (identifier := _placemark_id(placemark))]
-    if not kml_ids:
+    if not any(_kml_geometry_key(placemark) for placemark in placemarks):
         return (
-            "No placemark carries an identifier, so there is nothing to match the "
-            "features against. This service does not label its placemarks."
+            "The placemarks carry no coordinates, so they cannot be matched by "
+            "geometry, and their identifiers matched no feature."
         )
 
-    volatile = sum(1 for identifier in kml_ids if ".fid-" in identifier)
-    if volatile and volatile == len(kml_ids):
-        return (
-            "The placemark identifiers are per-request temporary ids (fid-...), which "
-            "the service regenerates for every call, so the styled KML and the feature "
-            "query name the same features differently and cannot be joined. This "
-            "happens for layers published without a primary key. Download the two "
-            "separately instead: `wms --format kml` for the styling, `wfs` for the "
-            "attributes."
-        )
-    if not properties_by_id:
-        return "The feature response carried no identified features to match against."
     return (
-        "No placemark could be matched to a feature by id. The two responses may "
-        "describe different layers or different extents."
+        "No placemark could be matched to a feature, by identifier or by coordinates. "
+        "The two responses most likely cover different extents or different layers -- "
+        "check that the feature query was not narrowed by --max-features or --filter."
     )
 
 
@@ -140,17 +215,29 @@ def merge_attributes(styled_kml: bytes, geojson: bytes) -> tuple[bytes, MergeRep
     except ET.ParseError as exc:
         raise ExportError(f"The styled KML could not be parsed: {exc}") from exc
 
-    properties_by_id = _feature_properties(geojson)
+    by_id, by_geometry = _index_features(geojson)
     placemarks = [element for element in root.iter() if _local(element.tag) == "Placemark"]
     if not placemarks:
         raise ExportError("The styled KML contains no placemarks to annotate.")
+
+    # Identifiers are preferred when they work: they are exact and cheap. But a
+    # layer published without a primary key gets a fresh `fid-...` per request,
+    # so the two responses label the same feature differently while describing
+    # the same coordinates. Deciding by trial rather than by guessing which case
+    # applies keeps both kinds of layer working.
+    strategy = "id"
+    if not any(by_id.get(_placemark_id(mark) or "") for mark in placemarks):
+        strategy = "geometry"
+        logger.info("Placemark ids did not match any feature; matching on geometry instead")
 
     matched = 0
     attributes_added = 0
 
     for placemark in placemarks:
-        identifier = _placemark_id(placemark)
-        properties = properties_by_id.get(identifier or "")
+        if strategy == "id":
+            properties = by_id.get(_placemark_id(placemark) or "")
+        else:
+            properties = by_geometry.get(_kml_geometry_key(placemark))
         if not properties:
             continue
 
@@ -169,13 +256,14 @@ def merge_attributes(styled_kml: bytes, geojson: bytes) -> tuple[bytes, MergeRep
 
     report = MergeReport(
         placemarks=len(placemarks),
-        features=len(properties_by_id),
+        features=len(by_id if strategy == "id" else by_geometry),
+        strategy=strategy,
         matched=matched,
         unmatched_placemarks=len(placemarks) - matched,
         attributes_added=attributes_added,
     )
     if matched == 0:
-        raise ExportError(_no_match_reason(placemarks, properties_by_id))
+        raise ExportError(_no_match_reason(placemarks, by_id, by_geometry))
     if not report.complete:
         logger.warning(
             "%d placemark(s) had no matching feature and carry no attributes; "
