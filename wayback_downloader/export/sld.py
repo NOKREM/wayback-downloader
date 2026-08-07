@@ -211,6 +211,61 @@ def parse_sld(document: bytes) -> list[StyleRule]:
     return rules
 
 
+def kml_colour(rgb: str, opacity: str | None = None) -> str | None:
+    """Convert an SLD ``#rrggbb`` and opacity into KML's ``aabbggrr``.
+
+    The two formats reverse the channel order and put alpha first. Checked
+    against GeoServer's own output: ``#999999`` at ``stroke-opacity`` 0.3
+    becomes ``4c999999``, which is exactly what its KML writer emits.
+    """
+    text = (rgb or "").strip().lstrip("#")
+    if len(text) != 6:
+        return None
+    try:
+        int(text, 16)
+    except ValueError:
+        return None
+
+    try:
+        alpha = round(float(opacity) * 255) if opacity else 255
+    except (TypeError, ValueError):
+        alpha = 255
+    alpha = max(0, min(255, alpha))
+
+    return f"{alpha:02x}{text[4:6]}{text[2:4]}{text[0:2]}".lower()
+
+
+@dataclass(frozen=True)
+class RuleStyle:
+    """The drawing instructions a rule carries, in KML terms."""
+
+    line_colour: str | None = None
+    line_width: str | None = None
+    fill_colour: str | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether the rule specifies nothing to draw with."""
+        return not (self.line_colour or self.line_width or self.fill_colour)
+
+
+def rule_style(rule: StyleRule) -> RuleStyle:
+    """Translate a rule's symbolizer parameters into KML styling.
+
+    A rule that defines no stroke of its own returns an empty style, and the
+    caller leaves that placemark as the server rendered it rather than
+    inventing a colour for it.
+    """
+    css = rule.css
+    return RuleStyle(
+        line_colour=(
+            kml_colour(css["stroke"], css.get("stroke-opacity")) if css.get("stroke") else None
+        ),
+        line_width=css.get("stroke-width"),
+        fill_colour=kml_colour(css["fill"], css.get("fill-opacity")) if css.get("fill") else None,
+    )
+
+
 def classify(rules: list[StyleRule], attributes: dict[str, Any]) -> StyleRule | None:
     """Return the first rule a feature falls under, else the ElseFilter rule.
 

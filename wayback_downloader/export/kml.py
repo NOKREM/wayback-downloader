@@ -24,7 +24,7 @@ from html import unescape
 from typing import Any, Iterable
 
 from wayback_downloader.exceptions import ExportError
-from wayback_downloader.export.sld import classify, parse_sld
+from wayback_downloader.export.sld import RuleStyle, classify, parse_sld, rule_style
 from wayback_downloader.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -289,15 +289,53 @@ class LegendReport:
     placemarks: int
     labelled: int
     groups: dict[str, int] = field(default_factory=dict)
+    restyled: int = 0
+    colours: dict[str, str] = field(default_factory=dict)
 
     def summary(self) -> str:
         """A one-line description for logs and the CLI."""
         listed = ", ".join(f"{name} ({count})" for name, count in self.groups.items())
-        return f"{self.labelled}/{self.placemarks} placemark(s) classified: {listed}"
+        recoloured = f", {self.restyled} restyled" if self.restyled else ""
+        return f"{self.labelled}/{self.placemarks} placemark(s) classified{recoloured}: {listed}"
+
+
+def _style_id(label: str) -> str:
+    """Build a KML style id from a rule name."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", label).strip("-").lower()
+    return f"rule-{slug or 'unnamed'}"
+
+
+def _build_style(style_id: str, style: RuleStyle) -> ET.Element:
+    """Build a shared ``<Style>`` element from a rule's drawing instructions."""
+    element = ET.Element(f"{{{KML_NAMESPACE}}}Style", {"id": style_id})
+    if style.line_colour or style.line_width:
+        line = ET.SubElement(element, f"{{{KML_NAMESPACE}}}LineStyle")
+        if style.line_colour:
+            ET.SubElement(line, f"{{{KML_NAMESPACE}}}color").text = style.line_colour
+        if style.line_width:
+            ET.SubElement(line, f"{{{KML_NAMESPACE}}}width").text = style.line_width
+    if style.fill_colour:
+        poly = ET.SubElement(element, f"{{{KML_NAMESPACE}}}PolyStyle")
+        ET.SubElement(poly, f"{{{KML_NAMESPACE}}}color").text = style.fill_colour
+    return element
+
+
+def _restyle(placemark: ET.Element, style_id: str) -> None:
+    """Point a placemark at a shared style instead of its inline one."""
+    for inline in [c for c in placemark if _local(c.tag) in {"Style", "styleUrl"}]:
+        placemark.remove(inline)
+    # KML requires styleUrl before the geometry, and ElementTree appends, so the
+    # element is inserted at the front rather than added at the end.
+    url = ET.Element(f"{{{KML_NAMESPACE}}}styleUrl")
+    url.text = f"#{style_id}"
+    placemark.insert(0, url)
 
 
 def apply_stylesheet(
-    styled_kml: bytes, stylesheet: bytes, attribute: str = "sld_rule"
+    styled_kml: bytes,
+    stylesheet: bytes,
+    attribute: str = "sld_rule",
+    recolour: bool = True,
 ) -> tuple[bytes, LegendReport]:
     """Label each placemark with the stylesheet rule that selects it.
 
@@ -328,6 +366,9 @@ def apply_stylesheet(
 
     grouped: dict[str, list[ET.Element]] = {}
     labelled = 0
+    restyled = 0
+    colours: dict[str, str] = {}
+    shared: dict[str, RuleStyle] = {}
 
     for placemark in placemarks:
         attributes = _existing_attributes(placemark) or _description_attributes(placemark)
@@ -339,6 +380,24 @@ def apply_stylesheet(
         labelled += 1
         grouped.setdefault(rule.label, []).append(placemark)
         _add_attribute(placemark, attribute, rule.label)
+
+        # The server's KML paints every feature with the last matching rule's
+        # symbolizer, which for a stylesheet ending in a catch-all means one
+        # colour for the whole layer -- 660 of 660 grey on the tested layer,
+        # where the raster rendering shows four. Repointing each placemark at
+        # its own rule's style restores the distinction.
+        if not recolour:
+            continue
+        style = rule_style(rule)
+        if style.is_empty:
+            continue
+
+        style_id = _style_id(rule.label)
+        shared[style_id] = style
+        if style.line_colour:
+            colours[rule.label] = style.line_colour
+        _restyle(placemark, style_id)
+        restyled += 1
 
     # Detach every placemark from wherever it sat, then re-add it under a folder
     # named for its rule. Parents are found by search because ElementTree has no
@@ -353,6 +412,10 @@ def apply_stylesheet(
     # phantom legend entries.
     _drop_empty_folders(root)
 
+    # Shared styles have to precede the folders that reference them.
+    for index, (style_id, style) in enumerate(shared.items()):
+        document.insert(index, _build_style(style_id, style))
+
     for name, members in grouped.items():
         folder = ET.SubElement(document, f"{{{KML_NAMESPACE}}}Folder")
         ET.SubElement(folder, f"{{{KML_NAMESPACE}}}name").text = name
@@ -363,6 +426,8 @@ def apply_stylesheet(
         placemarks=len(placemarks),
         labelled=labelled,
         groups={name: len(members) for name, members in grouped.items()},
+        restyled=restyled,
+        colours=colours,
     )
     if labelled == 0:
         raise ExportError(

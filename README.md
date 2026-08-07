@@ -663,12 +663,31 @@ which is what a viewer shows as a legend with a togglable entry per category:
 > actually selects them (`faytipi=4`) defines no stroke of its own. Matching on
 > colour would file every one under "DIGER FAY HATLARI". The filters put them
 > where they belong — verified: 660 of 660 landed in the folder their own
-> `faytipi` selects, none in the wrong one, and all 660 kept their `LineStyle`.
+> `faytipi` selects, none in the wrong one.
+
+**The colours are applied too.** That single grey is not the stylesheet's
+doing: GeoServer's KML writer paints each placemark with the *last* matching
+rule's symbolizer, so a stylesheet ending in a catch-all collapses every
+category into it — while the raster rendering of the same stylesheet shows four
+distinct colours. Each placemark is repointed at a shared `<Style>` built from
+its own rule:
+
+| Category | SLD | KML |
+|---|---|---|
+| HOLOSEN FAYI | `#ff0000` | `ff0000ff` |
+| DEPREM YUZEY KIRIGI | `#ffc321`, width 3 | `ff21c3ff` |
+| KUVATERNER FAYI | `#800080` | `ff800080` |
+| OLASI KUVATERNER FAYI | *(no stroke)* | left as the server drew it |
+
+KML reverses the channel order and puts alpha first; the conversion is checked
+against GeoServer's own output, where `#999999` at `stroke-opacity` 0.3 comes
+back as `4c999999`. A rule that defines nothing to draw with leaves its
+placemarks alone rather than having a colour invented for them, and
+`recolour=False` classifies without restyling.
 
 An unrecognised filter construct makes its rule non-matching rather than
 matching everything, so an unsupported one leaves features unlabelled instead of
-labelling them wrongly. The styling itself is never touched — this adds the
-names the server left out; it does not re-render anything.
+labelling them wrongly.
 
 That is the style definition rather than a rendering of it — 10 rules, 8
 filters, stroke colours and widths on the MTA fault layer — which is what you

@@ -34,6 +34,9 @@ SLD = b"""<?xml version="1.0" encoding="UTF-8"?>
         <ogc:Filter><ogc:PropertyIsEqualTo>
           <ogc:PropertyName>faytipi</ogc:PropertyName><ogc:Literal>2</ogc:Literal>
         </ogc:PropertyIsEqualTo></ogc:Filter>
+        <sld:LineSymbolizer><sld:Stroke>
+          <sld:CssParameter name="stroke">#ff0000</sld:CssParameter>
+        </sld:Stroke></sld:LineSymbolizer>
       </sld:Rule>
       <sld:Rule>
         <sld:Title>DEPREM YUZEY KIRIGI</sld:Title>
@@ -189,13 +192,62 @@ def test_the_rule_name_is_recorded_on_each_placemark() -> None:
     assert values["faytipi"] == "1"
 
 
-def test_styling_and_geometry_are_untouched() -> None:
-    """Classification adds names; it does not re-render anything."""
+def test_each_category_gets_its_own_rule_colour() -> None:
+    """The server paints the whole layer in one colour; the SLD does not.
+
+    GeoServer's KML writer applies the last matching rule's symbolizer, so a
+    stylesheet ending in a catch-all collapses every category to that
+    catch-all's colour -- 660 of 660 grey on the tested layer, where the raster
+    rendering of the same stylesheet shows four distinct colours.
+    """
+    merged, report = apply_stylesheet(kml_with("1", "2"), SLD)
+    text = merged.decode()
+
+    assert report.restyled == 2
+    # #ffc321 width 3 and #ff0000, converted to KML's alpha-first reversed order.
+    assert report.colours["DEPREM YUZEY KIRIGI"] == "ff21c3ff"
+    assert report.colours["HOLOSEN FAYI"] == "ff0000ff"
+
+    assert '<Style id="rule-deprem-yuzey-kirigi">' in text
+    assert "<styleUrl>#rule-holosen-fayi</styleUrl>" in text
+    # The inline style each placemark arrived with is gone.
+    assert "4c999999" not in text
+
+
+def test_shared_styles_are_declared_before_they_are_used() -> None:
+    """A styleUrl pointing at a style declared later does not resolve."""
+    merged, _ = apply_stylesheet(kml_with("1"), SLD)
+    text = merged.decode()
+    assert text.index("<Style id=") < text.index("<styleUrl>")
+
+
+def test_geometry_survives_the_restyle() -> None:
+    """Only the styling is replaced."""
     merged, _ = apply_stylesheet(kml_with("1", "2"), SLD)
     text = merged.decode()
-    assert text.count("<LineStyle") == 2
-    assert text.count("4c999999") == 2
     assert "26.0,39.0" in text and "26.1,39.0" in text
+
+
+def test_a_rule_with_no_symbolizer_keeps_the_server_rendering() -> None:
+    """Nothing to apply means nothing is invented.
+
+    On the live layer this is the faytipi=4 rule, which selects features but
+    defines no stroke of its own.
+    """
+    document = SLD.replace(b'<sld:CssParameter name="stroke">#ff0000</sld:CssParameter>', b"")
+    merged, report = apply_stylesheet(kml_with("2"), document)
+
+    assert report.restyled == 0
+    assert b"4c999999" in merged
+
+
+def test_recolouring_can_be_turned_off() -> None:
+    """Classification without restyling, for a stylesheet you do not trust."""
+    merged, report = apply_stylesheet(kml_with("1", "2"), SLD, recolour=False)
+
+    assert report.restyled == 0
+    assert merged.decode().count("4c999999") == 2
+    assert report.groups  # still classified
 
 
 def test_the_documents_previous_empty_folders_are_removed() -> None:
