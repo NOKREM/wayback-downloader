@@ -703,6 +703,11 @@ the result in a viewer:
   zero-alpha `IconStyle`. A style that supplies only a `LineStyle` lets the
   viewer fall back to its default pushpin, and every line renders as a marker.
   Generated styles therefore carry a transparent icon and a hidden label too.
+* **A point layer is the opposite case.** There the icon *is* the feature, and
+  hiding it erases the map — on a 1668-point earthquake layer it made every one
+  invisible. Placemarks with no line or polygon are recognised as points: their
+  existing icon is tinted with the rule's fill colour, keeping the symbol and
+  size the service chose, rather than being replaced by a generated style.
 * **Lines are drawn opaque.** The catch-all rule paints at 30% opacity, which
   washes the darker categories out against imagery. The hue the stylesheet or
   the server chose is kept; the transparency is not. `opaque_lines=False`

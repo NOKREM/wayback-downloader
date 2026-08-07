@@ -265,6 +265,84 @@ def test_rule_colours_are_made_opaque_too() -> None:
     assert faithful.colours["HOLOSEN FAYI"] == "4c0000ff"
 
 
+POINT_SLD = b"""<?xml version="1.0" encoding="UTF-8"?>
+<sld:StyledLayerDescriptor xmlns:sld="http://www.opengis.net/sld"
+    xmlns:ogc="http://www.opengis.net/ogc" version="1.0.0">
+  <sld:NamedLayer><sld:UserStyle><sld:FeatureTypeStyle>
+    <sld:Rule>
+      <sld:Title>4.0 - 4.9</sld:Title>
+      <ogc:Filter><ogc:PropertyIsEqualTo>
+        <ogc:PropertyName>band</ogc:PropertyName><ogc:Literal>4</ogc:Literal>
+      </ogc:PropertyIsEqualTo></ogc:Filter>
+      <sld:PointSymbolizer><sld:Graphic><sld:Mark><sld:Fill>
+        <sld:CssParameter name="fill">#0c544a</sld:CssParameter>
+      </sld:Fill></sld:Mark></sld:Graphic></sld:PointSymbolizer>
+    </sld:Rule>
+  </sld:FeatureTypeStyle></sld:UserStyle></sld:NamedLayer>
+</sld:StyledLayerDescriptor>
+"""
+
+# A genuine point layer: no line anywhere, and the icon is the feature.
+POINT_KML = (
+    f'<?xml version="1.0" encoding="UTF-8"?><kml xmlns="{KML_NAMESPACE}"><Document>'
+    "<Placemark>"
+    "<Style><IconStyle><color>ffaaaaaa</color><scale>0.97</scale>"
+    "<Icon><href>http://example.org/circle.png</href></Icon></IconStyle></Style>"
+    '<ExtendedData><Data name="band"><value>4</value></Data></ExtendedData>'
+    "<Point><coordinates>27.0,39.0</coordinates></Point>"
+    "</Placemark></Document></kml>"
+).encode()
+
+
+def test_a_point_layer_keeps_its_symbol_and_gains_the_rule_colour() -> None:
+    """The hide-the-icon trick is for line anchors, and ruins a point layer.
+
+    GeoServer pairs a line with a Point used only to hang an icon on, and
+    hides it. A real point layer has no line and the icon *is* the feature:
+    applying the same style there made all 1668 earthquakes on the tested layer
+    invisible.
+    """
+    merged, report = apply_stylesheet(POINT_KML, POINT_SLD)
+    root = ET.fromstring(merged)
+
+    icon = next(e for e in root.iter() if e.tag == f"{NS}IconStyle")
+    # #0c544a reversed into KML's bbggrr, opaque since the fill sets no opacity.
+    assert next(c.text for c in icon if c.tag == f"{NS}color") == "ff4a540c"
+    # The service's own symbol and size survive; only the colour is applied.
+    assert next(c.text for c in icon if c.tag == f"{NS}scale") == "0.97"
+    assert any(c.tag == f"{NS}Icon" for c in icon)
+    assert report.restyled == 1
+
+
+def test_a_point_layer_gets_no_hidden_icon_style() -> None:
+    """Nothing may make the marks invisible."""
+    merged, _ = apply_stylesheet(POINT_KML, POINT_SLD)
+    assert b"00ffffff" not in merged
+    assert b"<scale>0</scale>" not in merged
+
+
+def test_a_line_with_a_point_anchor_is_still_treated_as_a_line() -> None:
+    """A MultiGeometry holding both is a line, and its anchor stays hidden."""
+    both = (
+        f'<?xml version="1.0"?><kml xmlns="{KML_NAMESPACE}"><Document>'
+        "<Placemark>"
+        "<Style><IconStyle><color>00ffffff</color></IconStyle>"
+        "<LineStyle><color>4c999999</color></LineStyle></Style>"
+        '<ExtendedData><Data name="faytipi"><value>1</value></Data></ExtendedData>'
+        "<MultiGeometry><Point><coordinates>26,39</coordinates></Point>"
+        "<LineString><coordinates>26,39 27,39</coordinates></LineString></MultiGeometry>"
+        "</Placemark></Document></kml>"
+    ).encode()
+
+    merged, _ = apply_stylesheet(both, SLD)
+    root = ET.fromstring(merged)
+    style = next(e for e in root.iter() if e.tag == f"{NS}Style" and e.get("id"))
+
+    icon = next(c for c in style if c.tag == f"{NS}IconStyle")
+    assert next(c.text for c in icon if c.tag == f"{NS}color") == "00ffffff"
+    assert any(c.tag == f"{NS}LineStyle" for c in style)
+
+
 def test_the_point_anchor_stays_hidden() -> None:
     """GeoServer pairs each line with a Point, and hides it with a clear icon.
 

@@ -305,6 +305,38 @@ def _style_id(label: str) -> str:
     return f"rule-{slug or 'unnamed'}"
 
 
+def _draws_a_point(placemark: ET.Element) -> bool:
+    """Whether this placemark's own mark is a point rather than a line or area.
+
+    GeoServer pairs a line with a Point purely as an icon anchor, so the mere
+    presence of a Point means nothing: what matters is whether there is a line
+    or polygon alongside it. On a genuine point layer the icon *is* the feature,
+    and hiding it -- correct for an anchor -- erases the map.
+    """
+    for element in placemark.iter():
+        if _local(element.tag) in {"LineString", "LinearRing", "Polygon"}:
+            return False
+    return any(_local(element.tag) == "Point" for element in placemark.iter())
+
+
+def _recolour_icon(placemark: ET.Element, colour: str) -> bool:
+    """Tint a point placemark's existing icon, keeping the server's symbol.
+
+    Editing in place rather than replacing the style: the inline ``IconStyle``
+    carries the ``<Icon><href>`` and scale the service chose, and a generated
+    style would lose the symbol along with the colour.
+    """
+    changed = False
+    for icon in (e for e in placemark.iter() if _local(e.tag) == "IconStyle"):
+        for existing in [c for c in icon if _local(c.tag) == "color"]:
+            icon.remove(existing)
+        element = ET.Element(f"{{{KML_NAMESPACE}}}color")
+        element.text = colour
+        icon.insert(0, element)
+        changed = True
+    return changed
+
+
 def _build_style(style_id: str, style: RuleStyle) -> ET.Element:
     """Build a shared ``<Style>`` element from a rule's drawing instructions.
 
@@ -431,6 +463,16 @@ def apply_stylesheet(
 
         if opaque_lines and style.line_colour and not style.line_colour.startswith("ff"):
             style = replace(style, line_colour=f"ff{style.line_colour[2:]}")
+
+        # A point layer's colour lives in its icon, not in a PolyStyle, and its
+        # icon must stay visible. Tint the symbol the service already chose
+        # rather than swapping in a style that would hide it.
+        if _draws_a_point(placemark):
+            tint = style.fill_colour or style.line_colour
+            if tint and _recolour_icon(placemark, tint):
+                colours[rule.label] = tint
+                restyled += 1
+            continue
 
         style_id = _style_id(rule.label)
         shared[style_id] = style
